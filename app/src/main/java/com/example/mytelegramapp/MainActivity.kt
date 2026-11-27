@@ -5,12 +5,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -21,12 +19,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.BufferedReader
-import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
@@ -44,14 +41,32 @@ data class ChatMessage(
     val isMine: Boolean
 )
 
+data class UiConfig(
+    val appTitle: String = "Advanced Telegram",
+    val topBarColor: Color = Color(0xFF1F2937),
+    val bgColor: Color = Color(0xFF121212),
+    val cardColor: Color = Color(0xFF1E1E1E),
+    val mineBubbleColor: Color = Color(0xFF1D4ED8),
+    val otherBubbleColor: Color = Color(0xFF262626),
+    val refreshMs: Long = 1000L
+)
+
 private const val BRIDGE_BASE = "http://127.0.0.1:8765"
+
+private fun parseColorSafe(hex: String, fallback: Color): Color {
+    return try {
+        Color(android.graphics.Color.parseColor(hex))
+    } catch (_: Exception) {
+        fallback
+    }
+}
 
 private fun httpGet(path: String): String {
     val url = URL("$BRIDGE_BASE$path")
     val conn = (url.openConnection() as HttpURLConnection).apply {
         requestMethod = "GET"
-        connectTimeout = 10000
-        readTimeout = 30000
+        connectTimeout = 5000
+        readTimeout = 15000
     }
     val code = conn.responseCode
     val stream = if (code in 200..299) conn.inputStream else conn.errorStream
@@ -67,8 +82,8 @@ private fun httpPostJson(path: String, jsonBody: String): String {
     val conn = (url.openConnection() as HttpURLConnection).apply {
         requestMethod = "POST"
         doOutput = true
-        connectTimeout = 10000
-        readTimeout = 30000
+        connectTimeout = 5000
+        readTimeout = 15000
         setRequestProperty("Content-Type", "application/json; charset=utf-8")
     }
     OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
@@ -82,6 +97,21 @@ private fun httpPostJson(path: String, jsonBody: String): String {
         throw RuntimeException("HTTP $code: $body")
     }
     return body
+}
+
+private suspend fun fetchUiConfig(): UiConfig = withContext(Dispatchers.IO) {
+    val raw = httpGet("/ui")
+    val obj = JSONObject(raw)
+    val def = UiConfig()
+    UiConfig(
+        appTitle = obj.optString("appTitle", def.appTitle),
+        topBarColor = parseColorSafe(obj.optString("topBarColor", ""), def.topBarColor),
+        bgColor = parseColorSafe(obj.optString("bgColor", ""), def.bgColor),
+        cardColor = parseColorSafe(obj.optString("cardColor", ""), def.cardColor),
+        mineBubbleColor = parseColorSafe(obj.optString("mineBubbleColor", ""), def.mineBubbleColor),
+        otherBubbleColor = parseColorSafe(obj.optString("otherBubbleColor", ""), def.otherBubbleColor),
+        refreshMs = obj.optLong("refreshMs", def.refreshMs).coerceAtLeast(500L)
+    )
 }
 
 private suspend fun fetchRealChats(): List<ChatItem> = withContext(Dispatchers.IO) {
@@ -137,86 +167,96 @@ class MainActivity : ComponentActivity() {
                     primary = Color(0xFF2563EB)
                 )
             ) {
-                TelegramRealApp()
+                AdvancedTelegramApp()
             }
         }
     }
 }
 
 @Composable
-fun TelegramRealApp() {
+fun AdvancedTelegramApp() {
     val scope = rememberCoroutineScope()
+    var uiConfig by remember { mutableStateOf(UiConfig()) }
     var selectedChat by remember { mutableStateOf<ChatItem?>(null) }
     var chats by remember { mutableStateOf<List<ChatItem>>(emptyList()) }
     var messages by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
-    var isLoadingMessages by remember { mutableStateOf(false) }
-    var statusText by remember { mutableStateOf("Chats load ho rahi hain...") }
-    var isLoading by remember { mutableStateOf(true) }
+    var isInitialChatsLoading by remember { mutableStateOf(true) }
+    var isInitialMessagesLoading by remember { mutableStateOf(false) }
 
-    fun loadChats() {
-        isLoading = true
-        statusText = "Chats load ho rahi hain..."
-        scope.launch {
+    // Fetch UI config from bridge every second (live update without rebuilding APK)
+    LaunchedEffect(Unit) {
+        while (true) {
             try {
-                chats = fetchRealChats()
-                statusText = "Connected (${chats.size} chats)"
-            } catch (e: Exception) {
-                statusText = "Error: ${e.javaClass.simpleName}: ${e.message}"
-            } finally {
-                isLoading = false
+                val freshUi = fetchUiConfig()
+                if (freshUi != uiConfig) {
+                    uiConfig = freshUi
+                }
+            } catch (_: Exception) {
+            }
+            delay(1000L)
+        }
+    }
+
+    LaunchedEffect(selectedChat, uiConfig.refreshMs) {
+        if (selectedChat == null) {
+            while (true) {
+                try {
+                    val fresh = fetchRealChats()
+                    if (fresh != chats) {
+                        chats = fresh
+                    }
+                } catch (_: Exception) {
+                } finally {
+                    isInitialChatsLoading = false
+                }
+                delay(uiConfig.refreshMs)
             }
         }
     }
 
-    LaunchedEffect(Unit) {
-        loadChats()
+    LaunchedEffect(selectedChat?.id, uiConfig.refreshMs) {
+        val active = selectedChat
+        if (active != null) {
+            while (true) {
+                try {
+                    val freshMsgs = fetchRealMessages(active.id)
+                    if (freshMsgs != messages) {
+                        messages = freshMsgs
+                    }
+                } catch (_: Exception) {
+                } finally {
+                    isInitialMessagesLoading = false
+                }
+                delay(uiConfig.refreshMs)
+            }
+        }
     }
 
     val current = selectedChat
     if (current == null) {
         ChatListScreen(
             chats = chats,
-            statusText = statusText,
-            isLoading = isLoading,
-            onRefresh = { loadChats() },
+            uiConfig = uiConfig,
+            isLoading = isInitialChatsLoading,
             onChatClick = { chat ->
                 selectedChat = chat
                 messages = emptyList()
-                isLoadingMessages = true
-                scope.launch {
-                    try {
-                        messages = fetchRealMessages(chat.id)
-                    } catch (e: Exception) {
-                        messages = listOf(
-                            ChatMessage(
-                                "Error",
-                                "${e.javaClass.simpleName}: ${e.message ?: "Unknown error"}",
-                                false
-                            )
-                        )
-                    } finally {
-                        isLoadingMessages = false
-                    }
-                }
+                isInitialMessagesLoading = true
             }
         )
     } else {
         ChatDetailScreen(
             chat = current,
             messages = messages,
-            isLoading = isLoadingMessages,
+            uiConfig = uiConfig,
+            isLoading = isInitialMessagesLoading,
             onBack = { selectedChat = null },
             onSend = { text ->
                 scope.launch {
                     try {
                         sendRealMessage(current.id, text)
                         messages = fetchRealMessages(current.id)
-                    } catch (e: Exception) {
-                        messages = messages + ChatMessage(
-                            "Error",
-                            "Send fail (${e.javaClass.simpleName}): ${e.message}",
-                            false
-                        )
+                    } catch (_: Exception) {
                     }
                 }
             }
@@ -228,113 +268,53 @@ fun TelegramRealApp() {
 @Composable
 fun ChatListScreen(
     chats: List<ChatItem>,
-    statusText: String,
+    uiConfig: UiConfig,
     isLoading: Boolean,
-    onRefresh: () -> Unit,
     onChatClick: (ChatItem) -> Unit
 ) {
-    var searchQuery by remember { mutableStateOf("") }
-    var selectedFilter by remember { mutableStateOf("All") }
-    val filters = listOf("All", "Personal Chat", "Group", "Channel")
-
-    val filteredChats = remember(chats, searchQuery, selectedFilter) {
-        chats.filter { item ->
-            val matchesType = selectedFilter == "All" || item.type.equals(selectedFilter, ignoreCase = true)
-            val matchesQuery = searchQuery.isBlank() ||
-                item.title.contains(searchQuery, ignoreCase = true) ||
-                item.lastMessage.contains(searchQuery, ignoreCase = true)
-            matchesType && matchesQuery
-        }
-    }
-
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("My Telegram App", fontWeight = FontWeight.Bold) },
-                actions = {
-                    TextButton(onClick = onRefresh) {
-                        Text("Refresh", color = Color(0xFF93C5FD))
-                    }
-                },
+                title = { Text(uiConfig.appTitle, fontWeight = FontWeight.Bold) },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color(0xFF1F2937),
+                    containerColor = uiConfig.topBarColor,
                     titleContentColor = Color.White
                 )
             )
         },
-        containerColor = Color(0xFF121212)
+        containerColor = uiConfig.bgColor
     ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color(0xFF121212))
-                .padding(padding)
-                .padding(12.dp)
-        ) {
-            Text(statusText, color = Color(0xFF9CA3AF), fontSize = 12.sp)
-            Spacer(modifier = Modifier.height(8.dp))
-
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = { searchQuery = it },
-                modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("Chat, group ya channel search karein...") },
-                singleLine = true
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Row(
+        if (isLoading && chats.isEmpty()) {
+            Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    .fillMaxSize()
+                    .background(uiConfig.bgColor)
+                    .padding(padding),
+                contentAlignment = Alignment.Center
             ) {
-                filters.forEach { tab ->
-                    FilterChip(
-                        selected = selectedFilter == tab,
-                        onClick = { selectedFilter = tab },
-                        label = { Text(tab) }
-                    )
-                }
+                CircularProgressIndicator()
             }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            if (isLoading) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    CircularProgressIndicator()
-                }
-            } else if (filteredChats.isEmpty()) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        "Koi chat nahi mili. Refresh dabayein ya Termux bridge check karein.",
-                        color = Color(0xFF9CA3AF),
-                        fontSize = 14.sp
-                    )
-                }
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    items(filteredChats, key = { it.id }) { chat ->
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(Color(0xFF1E1E1E), RoundedCornerShape(10.dp))
-                                .clickable { onChatClick(chat) }
-                                .padding(12.dp)
-                        ) {
-                            Text(chat.title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(uiConfig.bgColor)
+                    .padding(padding)
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(chats, key = { it.id }) { chat ->
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(uiConfig.cardColor, RoundedCornerShape(10.dp))
+                            .clickable { onChatClick(chat) }
+                            .padding(12.dp)
+                    ) {
+                        Text(chat.title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        if (chat.lastMessage.isNotBlank()) {
                             Spacer(modifier = Modifier.height(2.dp))
-                            Text("${chat.type} • ${chat.lastMessage}", color = Color(0xFF9CA3AF), fontSize = 13.sp)
+                            Text(chat.lastMessage, color = Color(0xFF9CA3AF), fontSize = 13.sp, maxLines = 2)
                         }
                     }
                 }
@@ -348,6 +328,7 @@ fun ChatListScreen(
 fun ChatDetailScreen(
     chat: ChatItem,
     messages: List<ChatMessage>,
+    uiConfig: UiConfig,
     isLoading: Boolean,
     onBack: () -> Unit,
     onSend: (String) -> Unit
@@ -370,7 +351,7 @@ fun ChatDetailScreen(
                         Text("← Back", color = Color(0xFF93C5FD))
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF1F2937))
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = uiConfig.topBarColor)
             )
         },
         bottomBar = {
@@ -402,31 +383,24 @@ fun ChatDetailScreen(
                 }
             }
         },
-        containerColor = Color(0xFF121212)
+        containerColor = uiConfig.bgColor
     ) { padding ->
-        if (isLoading) {
+        if (isLoading && messages.isEmpty()) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
+                    .background(uiConfig.bgColor)
                     .padding(padding),
                 contentAlignment = Alignment.Center
             ) {
                 CircularProgressIndicator()
-            }
-        } else if (messages.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("Is chat mein koi text message nahi mila.", color = Color(0xFF9CA3AF))
             }
         } else {
             LazyColumn(
                 state = listState,
                 modifier = Modifier
                     .fillMaxSize()
+                    .background(uiConfig.bgColor)
                     .padding(padding)
                     .padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -436,7 +410,7 @@ fun ChatDetailScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .background(
-                                if (msg.isMine) Color(0xFF1D4ED8) else Color(0xFF262626),
+                                if (msg.isMine) uiConfig.mineBubbleColor else uiConfig.otherBubbleColor,
                                 RoundedCornerShape(10.dp)
                             )
                             .padding(10.dp)
