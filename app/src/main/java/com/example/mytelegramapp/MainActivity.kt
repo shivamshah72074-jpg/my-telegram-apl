@@ -5,9 +5,11 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -47,8 +49,8 @@ private fun httpGet(path: String): String {
     val url = URL("$BRIDGE_BASE$path")
     val conn = (url.openConnection() as HttpURLConnection).apply {
         requestMethod = "GET"
-        connectTimeout = 5000
-        readTimeout = 8000
+        connectTimeout = 10000
+        readTimeout = 60000
     }
     return conn.inputStream.use { stream ->
         BufferedReader(InputStreamReader(stream)).use { it.readText() }
@@ -60,8 +62,8 @@ private fun httpPostJson(path: String, jsonBody: String): String {
     val conn = (url.openConnection() as HttpURLConnection).apply {
         requestMethod = "POST"
         doOutput = true
-        connectTimeout = 5000
-        readTimeout = 8000
+        connectTimeout = 10000
+        readTimeout = 60000
         setRequestProperty("Content-Type", "application/json; charset=utf-8")
     }
     OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
@@ -131,17 +133,18 @@ fun TelegramRealApp() {
     var selectedChat by remember { mutableStateOf<ChatItem?>(null) }
     var chats by remember { mutableStateOf<List<ChatItem>>(emptyList()) }
     var messages by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
-    var statusText by remember { mutableStateOf("Termux bridge se connect ho raha hai...") }
+    var statusText by remember { mutableStateOf("Sabhi chats load ho rahi hain...") }
     var isLoading by remember { mutableStateOf(true) }
 
     fun loadChats() {
         isLoading = true
+        statusText = "Sabhi chats load ho rahi hain..."
         scope.launch {
             try {
                 chats = fetchRealChats()
-                statusText = "Connected to Telegram Bridge (${chats.size} chats)"
+                statusText = "Connected (${chats.size} total chats/groups/channels)"
             } catch (e: Exception) {
-                statusText = "Bridge off hai: Termux mein bridge_server.py chalayein"
+                statusText = "Error: ${e.message ?: "Bridge se connect nahi ho paya"}"
             } finally {
                 isLoading = false
             }
@@ -199,6 +202,20 @@ fun ChatListScreen(
     onRefresh: () -> Unit,
     onChatClick: (ChatItem) -> Unit
 ) {
+    var searchQuery by remember { mutableStateOf("") }
+    var selectedFilter by remember { mutableStateOf("All") }
+    val filters = listOf("All", "Personal Chat", "Group", "Channel")
+
+    val filteredChats = remember(chats, searchQuery, selectedFilter) {
+        chats.filter { item ->
+            val matchesType = selectedFilter == "All" || item.type.equals(selectedFilter, ignoreCase = true)
+            val matchesQuery = searchQuery.isBlank() ||
+                item.title.contains(searchQuery, ignoreCase = true) ||
+                item.lastMessage.contains(searchQuery, ignoreCase = true)
+            matchesType && matchesQuery
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -219,19 +236,64 @@ fun ChatListScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .background(Color(0xFF121212))
                 .padding(padding)
                 .padding(12.dp)
         ) {
             Text(statusText, color = Color(0xFF9CA3AF), fontSize = 12.sp)
             Spacer(modifier = Modifier.height(8.dp))
+
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                modifier = Modifier.fillMaxWidth(),
+                placeholder = { Text("Chat, group ya channel search karein...") },
+                singleLine = true
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                filters.forEach { tab ->
+                    FilterChip(
+                        selected = selectedFilter == tab,
+                        onClick = { selectedFilter = tab },
+                        label = { Text(tab) }
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
             if (isLoading) {
-                CircularProgressIndicator()
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator()
+                }
+            } else if (filteredChats.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        "Koi chat nahi mili. Refresh dabayein ya Termux bridge check karein.",
+                        color = Color(0xFF9CA3AF),
+                        fontSize = 14.sp
+                    )
+                }
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(chats) { chat ->
+                    items(filteredChats, key = { it.id }) { chat ->
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
