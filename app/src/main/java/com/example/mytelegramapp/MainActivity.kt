@@ -183,7 +183,6 @@ fun AdvancedTelegramApp() {
     var isInitialChatsLoading by remember { mutableStateOf(true) }
     var isInitialMessagesLoading by remember { mutableStateOf(false) }
 
-    // Fetch UI config from bridge every second (live update without rebuilding APK)
     LaunchedEffect(Unit) {
         while (true) {
             try {
@@ -402,22 +401,39 @@ fun ChatDetailScreen(
                     .fillMaxSize()
                     .background(uiConfig.bgColor)
                     .padding(padding)
-                    .padding(12.dp),
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(messages) { msg ->
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(
-                                if (msg.isMine) uiConfig.mineBubbleColor else uiConfig.otherBubbleColor,
-                                RoundedCornerShape(10.dp)
-                            )
-                            .padding(10.dp)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = if (msg.isMine) Arrangement.End else Arrangement.Start
                     ) {
-                        Text(msg.sender, color = Color(0xFFBFDBFE), fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(msg.text, color = Color.White, fontSize = 14.sp)
+                        Column(
+                            modifier = Modifier
+                                .widthIn(max = 290.dp)
+                                .background(
+                                    if (msg.isMine) uiConfig.mineBubbleColor else uiConfig.otherBubbleColor,
+                                    RoundedCornerShape(
+                                        topStart = 12.dp,
+                                        topEnd = 12.dp,
+                                        bottomStart = if (msg.isMine) 12.dp else 2.dp,
+                                        bottomEnd = if (msg.isMine) 2.dp else 12.dp
+                                    )
+                                )
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                        ) {
+                            if (!msg.isMine) {
+                                Text(
+                                    msg.sender,
+                                    color = Color(0xFF93C5FD),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                            }
+                            Text(msg.text, color = Color.White, fontSize = 14.sp)
+                        }
                     }
                 }
             }
