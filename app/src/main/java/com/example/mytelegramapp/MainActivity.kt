@@ -17,6 +17,16 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.io.OutputStreamWriter
+import java.net.HttpURLConnection
+import java.net.URL
 
 data class ChatItem(
     val id: Long,
@@ -31,6 +41,73 @@ data class ChatMessage(
     val isMine: Boolean
 )
 
+private const val BRIDGE_BASE = "http://127.0.0.1:8765"
+
+private fun httpGet(path: String): String {
+    val url = URL("$BRIDGE_BASE$path")
+    val conn = (url.openConnection() as HttpURLConnection).apply {
+        requestMethod = "GET"
+        connectTimeout = 5000
+        readTimeout = 8000
+    }
+    return conn.inputStream.use { stream ->
+        BufferedReader(InputStreamReader(stream)).use { it.readText() }
+    }
+}
+
+private fun httpPostJson(path: String, jsonBody: String): String {
+    val url = URL("$BRIDGE_BASE$path")
+    val conn = (url.openConnection() as HttpURLConnection).apply {
+        requestMethod = "POST"
+        doOutput = true
+        connectTimeout = 5000
+        readTimeout = 8000
+        setRequestProperty("Content-Type", "application/json; charset=utf-8")
+    }
+    OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
+        writer.write(jsonBody)
+        writer.flush()
+    }
+    return conn.inputStream.use { stream ->
+        BufferedReader(InputStreamReader(stream)).use { it.readText() }
+    }
+}
+
+private suspend fun fetchRealChats(): List<ChatItem> = withContext(Dispatchers.IO) {
+    val raw = httpGet("/chats")
+    val arr = JSONArray(raw)
+    List(arr.length()) { i ->
+        val obj = arr.getJSONObject(i)
+        ChatItem(
+            id = obj.getLong("id"),
+            title = obj.optString("title", "Chat"),
+            type = obj.optString("type", "Chat"),
+            lastMessage = obj.optString("lastMessage", "")
+        )
+    }
+}
+
+private suspend fun fetchRealMessages(chatId: Long): List<ChatMessage> = withContext(Dispatchers.IO) {
+    val raw = httpGet("/messages/$chatId")
+    val arr = JSONArray(raw)
+    List(arr.length()) { i ->
+        val obj = arr.getJSONObject(i)
+        ChatMessage(
+            sender = obj.optString("sender", "User"),
+            text = obj.optString("text", ""),
+            isMine = obj.optBoolean("isMine", false)
+        )
+    }
+}
+
+private suspend fun sendRealMessage(chatId: Long, text: String) = withContext(Dispatchers.IO) {
+    val body = JSONObject().apply {
+        put("chatId", chatId)
+        put("text", text)
+    }.toString()
+    httpPostJson("/send", body)
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -42,54 +119,72 @@ class MainActivity : ComponentActivity() {
                     primary = Color(0xFF2563EB)
                 )
             ) {
-                TelegramCloneApp()
+                TelegramRealApp()
             }
         }
     }
 }
 
 @Composable
-fun TelegramCloneApp() {
+fun TelegramRealApp() {
+    val scope = rememberCoroutineScope()
     var selectedChat by remember { mutableStateOf<ChatItem?>(null) }
+    var chats by remember { mutableStateOf<List<ChatItem>>(emptyList()) }
+    var messages by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
+    var statusText by remember { mutableStateOf("Termux bridge se connect ho raha hai...") }
+    var isLoading by remember { mutableStateOf(true) }
 
-    val chats = remember {
-        listOf(
-            ChatItem(1L, "Saved Messages", "Personal Chat", "Notes & links ready"),
-            ChatItem(-100111L, "Tech & Growth Group", "Group", "Aaj ka update check karo"),
-            ChatItem(-100222L, "Updates Channel", "Channel", "New build version 0.1 live")
-        )
+    fun loadChats() {
+        isLoading = true
+        scope.launch {
+            try {
+                chats = fetchRealChats()
+                statusText = "Connected to Telegram Bridge (${chats.size} chats)"
+            } catch (e: Exception) {
+                statusText = "Bridge off hai: Termux mein bridge_server.py chalayein"
+            } finally {
+                isLoading = false
+            }
+        }
     }
 
-    val messagesByChat = remember {
-        mutableStateMapOf(
-            1L to mutableStateListOf(
-                ChatMessage("Me", "Starter Android app ready hai!", true),
-                ChatMessage("System", "Baad mein yahan Telegram messages connect honge.", false)
-            ),
-            -100111L to mutableStateListOf(
-                ChatMessage("Rahul", "Group messages yahan line se dikhenge.", false),
-                ChatMessage("Me", "Theek hai, UI test kar rahe hain.", true)
-            ),
-            -100222L to mutableStateListOf(
-                ChatMessage("Updates Channel", "Channel posts yahan show hongi.", false)
-            )
-        )
+    LaunchedEffect(Unit) {
+        loadChats()
     }
 
     val current = selectedChat
     if (current == null) {
         ChatListScreen(
             chats = chats,
-            onChatClick = { selectedChat = it }
+            statusText = statusText,
+            isLoading = isLoading,
+            onRefresh = { loadChats() },
+            onChatClick = { chat ->
+                selectedChat = chat
+                messages = emptyList()
+                scope.launch {
+                    try {
+                        messages = fetchRealMessages(chat.id)
+                    } catch (e: Exception) {
+                        messages = listOf(ChatMessage("Error", "Messages load nahi ho sake: ${e.message}", false))
+                    }
+                }
+            }
         )
     } else {
-        val msgs = messagesByChat.getOrPut(current.id) { mutableStateListOf() }
         ChatDetailScreen(
             chat = current,
-            messages = msgs,
+            messages = messages,
             onBack = { selectedChat = null },
             onSend = { text ->
-                msgs.add(ChatMessage("Me", text, true))
+                scope.launch {
+                    try {
+                        sendRealMessage(current.id, text)
+                        messages = fetchRealMessages(current.id)
+                    } catch (e: Exception) {
+                        messages = messages + ChatMessage("Error", "Send fail: ${e.message}", false)
+                    }
+                }
             }
         )
     }
@@ -99,12 +194,20 @@ fun TelegramCloneApp() {
 @Composable
 fun ChatListScreen(
     chats: List<ChatItem>,
+    statusText: String,
+    isLoading: Boolean,
+    onRefresh: () -> Unit,
     onChatClick: (ChatItem) -> Unit
 ) {
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("My Telegram App", fontWeight = FontWeight.Bold) },
+                actions = {
+                    TextButton(onClick = onRefresh) {
+                        Text("Refresh", color = Color(0xFF93C5FD))
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = Color(0xFF1F2937),
                     titleContentColor = Color.White
@@ -113,24 +216,34 @@ fun ChatListScreen(
         },
         containerColor = Color(0xFF121212)
     ) { padding ->
-        LazyColumn(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+                .padding(12.dp)
         ) {
-            items(chats) { chat ->
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF1E1E1E), RoundedCornerShape(10.dp))
-                        .clickable { onChatClick(chat) }
-                        .padding(12.dp)
+            Text(statusText, color = Color(0xFF9CA3AF), fontSize = 12.sp)
+            Spacer(modifier = Modifier.height(8.dp))
+            if (isLoading) {
+                CircularProgressIndicator()
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text(chat.title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text("${chat.type} • ${chat.lastMessage}", color = Color(0xFF9CA3AF), fontSize = 13.sp)
+                    items(chats) { chat ->
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0xFF1E1E1E), RoundedCornerShape(10.dp))
+                                .clickable { onChatClick(chat) }
+                                .padding(12.dp)
+                        ) {
+                            Text(chat.title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text("${chat.type} • ${chat.lastMessage}", color = Color(0xFF9CA3AF), fontSize = 13.sp)
+                        }
+                    }
                 }
             }
         }
