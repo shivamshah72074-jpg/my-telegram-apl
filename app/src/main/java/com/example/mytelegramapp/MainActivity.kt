@@ -9,6 +9,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -50,11 +51,15 @@ private fun httpGet(path: String): String {
     val conn = (url.openConnection() as HttpURLConnection).apply {
         requestMethod = "GET"
         connectTimeout = 10000
-        readTimeout = 60000
+        readTimeout = 30000
     }
-    return conn.inputStream.use { stream ->
-        BufferedReader(InputStreamReader(stream)).use { it.readText() }
+    val code = conn.responseCode
+    val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+    val body = stream?.bufferedReader()?.use { it.readText() } ?: ""
+    if (code !in 200..299) {
+        throw RuntimeException("HTTP $code: $body")
     }
+    return body
 }
 
 private fun httpPostJson(path: String, jsonBody: String): String {
@@ -63,16 +68,20 @@ private fun httpPostJson(path: String, jsonBody: String): String {
         requestMethod = "POST"
         doOutput = true
         connectTimeout = 10000
-        readTimeout = 60000
+        readTimeout = 30000
         setRequestProperty("Content-Type", "application/json; charset=utf-8")
     }
     OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
         writer.write(jsonBody)
         writer.flush()
     }
-    return conn.inputStream.use { stream ->
-        BufferedReader(InputStreamReader(stream)).use { it.readText() }
+    val code = conn.responseCode
+    val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+    val body = stream?.bufferedReader()?.use { it.readText() } ?: ""
+    if (code !in 200..299) {
+        throw RuntimeException("HTTP $code: $body")
     }
+    return body
 }
 
 private suspend fun fetchRealChats(): List<ChatItem> = withContext(Dispatchers.IO) {
@@ -133,18 +142,18 @@ fun TelegramRealApp() {
     var selectedChat by remember { mutableStateOf<ChatItem?>(null) }
     var chats by remember { mutableStateOf<List<ChatItem>>(emptyList()) }
     var messages by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
-    var statusText by remember { mutableStateOf("Sabhi chats load ho rahi hain...") }
+    var statusText by remember { mutableStateOf("Chats load ho rahi hain...") }
     var isLoading by remember { mutableStateOf(true) }
 
     fun loadChats() {
         isLoading = true
-        statusText = "Sabhi chats load ho rahi hain..."
+        statusText = "Chats load ho rahi hain..."
         scope.launch {
             try {
                 chats = fetchRealChats()
-                statusText = "Connected (${chats.size} total chats/groups/channels)"
+                statusText = "Connected (${chats.size} chats)"
             } catch (e: Exception) {
-                statusText = "Error: ${e.message ?: "Bridge se connect nahi ho paya"}"
+                statusText = "Error: ${e.javaClass.simpleName}: ${e.message}"
             } finally {
                 isLoading = false
             }
@@ -169,7 +178,13 @@ fun TelegramRealApp() {
                     try {
                         messages = fetchRealMessages(chat.id)
                     } catch (e: Exception) {
-                        messages = listOf(ChatMessage("Error", "Messages load nahi ho sake: ${e.message}", false))
+                        messages = listOf(
+                            ChatMessage(
+                                "Error",
+                                "${e.javaClass.simpleName}: ${e.message ?: "Unknown error"}",
+                                false
+                            )
+                        )
                     }
                 }
             }
@@ -185,7 +200,11 @@ fun TelegramRealApp() {
                         sendRealMessage(current.id, text)
                         messages = fetchRealMessages(current.id)
                     } catch (e: Exception) {
-                        messages = messages + ChatMessage("Error", "Send fail: ${e.message}", false)
+                        messages = messages + ChatMessage(
+                            "Error",
+                            "Send fail (${e.javaClass.simpleName}): ${e.message}",
+                            false
+                        )
                     }
                 }
             }
@@ -321,6 +340,13 @@ fun ChatDetailScreen(
     onSend: (String) -> Unit
 ) {
     var inputText by remember { mutableStateOf("") }
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) {
+            listState.scrollToItem(messages.lastIndex)
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -366,6 +392,7 @@ fun ChatDetailScreen(
         containerColor = Color(0xFF121212)
     ) { padding ->
         LazyColumn(
+            state = listState,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
