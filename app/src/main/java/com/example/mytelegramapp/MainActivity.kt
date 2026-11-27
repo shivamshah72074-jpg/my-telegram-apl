@@ -101,14 +101,21 @@ private suspend fun fetchRealChats(): List<ChatItem> = withContext(Dispatchers.I
 private suspend fun fetchRealMessages(chatId: Long): List<ChatMessage> = withContext(Dispatchers.IO) {
     val raw = httpGet("/messages/$chatId")
     val arr = JSONArray(raw)
-    List(arr.length()) { i ->
+    val list = mutableListOf<ChatMessage>()
+    for (i in 0 until arr.length()) {
         val obj = arr.getJSONObject(i)
-        ChatMessage(
-            sender = obj.optString("sender", "User"),
-            text = obj.optString("text", ""),
-            isMine = obj.optBoolean("isMine", false)
-        )
+        val txt = obj.optString("text", "").trim()
+        if (txt.isNotEmpty()) {
+            list.add(
+                ChatMessage(
+                    sender = obj.optString("sender", "User"),
+                    text = txt,
+                    isMine = obj.optBoolean("isMine", false)
+                )
+            )
+        }
     }
+    list
 }
 
 private suspend fun sendRealMessage(chatId: Long, text: String) = withContext(Dispatchers.IO) {
@@ -142,6 +149,7 @@ fun TelegramRealApp() {
     var selectedChat by remember { mutableStateOf<ChatItem?>(null) }
     var chats by remember { mutableStateOf<List<ChatItem>>(emptyList()) }
     var messages by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
+    var isLoadingMessages by remember { mutableStateOf(false) }
     var statusText by remember { mutableStateOf("Chats load ho rahi hain...") }
     var isLoading by remember { mutableStateOf(true) }
 
@@ -174,6 +182,7 @@ fun TelegramRealApp() {
             onChatClick = { chat ->
                 selectedChat = chat
                 messages = emptyList()
+                isLoadingMessages = true
                 scope.launch {
                     try {
                         messages = fetchRealMessages(chat.id)
@@ -185,6 +194,8 @@ fun TelegramRealApp() {
                                 false
                             )
                         )
+                    } finally {
+                        isLoadingMessages = false
                     }
                 }
             }
@@ -193,6 +204,7 @@ fun TelegramRealApp() {
         ChatDetailScreen(
             chat = current,
             messages = messages,
+            isLoading = isLoadingMessages,
             onBack = { selectedChat = null },
             onSend = { text ->
                 scope.launch {
@@ -336,6 +348,7 @@ fun ChatListScreen(
 fun ChatDetailScreen(
     chat: ChatItem,
     messages: List<ChatMessage>,
+    isLoading: Boolean,
     onBack: () -> Unit,
     onSend: (String) -> Unit
 ) {
@@ -392,28 +405,48 @@ fun ChatDetailScreen(
         },
         containerColor = Color(0xFF121212)
     ) { padding ->
-        LazyColumn(
-            state = listState,
-            reverseLayout = true,
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            items(reversedMessages) { msg ->
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(
-                            if (msg.isMine) Color(0xFF1D4ED8) else Color(0xFF262626),
-                            RoundedCornerShape(10.dp)
-                        )
-                        .padding(10.dp)
-                ) {
-                    Text(msg.sender, color = Color(0xFFBFDBFE), fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(msg.text, color = Color.White, fontSize = 14.sp)
+        if (isLoading) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator()
+            }
+        } else if (reversedMessages.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("Is chat mein koi text message nahi mila.", color = Color(0xFF9CA3AF))
+            }
+        } else {
+            LazyColumn(
+                state = listState,
+                reverseLayout = true,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(reversedMessages) { msg ->
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                if (msg.isMine) Color(0xFF1D4ED8) else Color(0xFF262626),
+                                RoundedCornerShape(10.dp)
+                            )
+                            .padding(10.dp)
+                    ) {
+                        Text(msg.sender, color = Color(0xFFBFDBFE), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(msg.text, color = Color.White, fontSize = 14.sp)
+                    }
                 }
             }
         }
