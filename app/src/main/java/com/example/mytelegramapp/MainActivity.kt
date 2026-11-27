@@ -341,10 +341,11 @@ fun ChatDetailScreen(
 ) {
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
+    val reversedMessages = remember(messages) { messages.asReversed() }
 
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
-            listState.scrollToItem(messages.lastIndex)
+    LaunchedEffect(reversedMessages.size) {
+        if (reversedMessages.isNotEmpty()) {
+            listState.scrollToItem(0)
         }
     }
 
@@ -393,13 +394,14 @@ fun ChatDetailScreen(
     ) { padding ->
         LazyColumn(
             state = listState,
+            reverseLayout = true,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
                 .padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            items(messages) { msg ->
+            items(reversedMessages) { msg ->
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
