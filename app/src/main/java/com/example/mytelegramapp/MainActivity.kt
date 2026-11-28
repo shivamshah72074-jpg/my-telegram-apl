@@ -53,13 +53,16 @@ data class ChatItem(
 
 private val globalRecentSentPhotos = mutableStateMapOf<String, String>()
 
-private fun mergeSentPhotos(
+private fun mergeSentPhotosForChat(
+    chatId: Long,
     fetched: List<ChatMessage>,
-    current: List<ChatMessage>
+    current: List<ChatMessage> = emptyList()
 ): List<ChatMessage> {
     val enriched = fetched.map { m ->
-        val savedPath = m.localPhotoPath ?: globalRecentSentPhotos[m.text]
-        if (m.hasMedia && savedPath != null) {
+        val savedPath = m.localPhotoPath
+            ?: globalRecentSentPhotos["${chatId}:${m.text}"]
+            ?: globalRecentSentPhotos[m.text]
+        if (m.hasMedia && savedPath != null && java.io.File(savedPath).exists()) {
             m.copy(localPhotoPath = savedPath)
         } else {
             m
@@ -67,6 +70,27 @@ private fun mergeSentPhotos(
     }
     val localOnly = current.filter { cur ->
         cur.isMine && cur.hasMedia && cur.localPhotoPath != null &&
+            java.io.File(cur.localPhotoPath).exists() &&
+            enriched.none { it.isMine && it.hasMedia && it.text == cur.text }
+    }
+    return enriched + localOnly
+}
+
+private fun mergeSentPhotos(
+    fetched: List<ChatMessage>,
+    current: List<ChatMessage>
+): List<ChatMessage> {
+    val enriched = fetched.map { m ->
+        val savedPath = m.localPhotoPath ?: globalRecentSentPhotos[m.text]
+        if (m.hasMedia && savedPath != null && java.io.File(savedPath).exists()) {
+            m.copy(localPhotoPath = savedPath)
+        } else {
+            m
+        }
+    }
+    val localOnly = current.filter { cur ->
+        cur.isMine && cur.hasMedia && cur.localPhotoPath != null &&
+            java.io.File(cur.localPhotoPath).exists() &&
             enriched.none { it.isMine && it.hasMedia && it.text == cur.text }
     }
     return enriched + localOnly
@@ -353,7 +377,7 @@ fun AdvancedTelegramApp() {
                 try {
                     val freshMsgs = fetchRealMessages(cid)
                     if (freshMsgs != messages) {
-                        messages = mergeSentPhotos(freshMsgs, messages)
+                        messages = mergeSentPhotosForChat(activeChat.id, freshMsgs, messages)
                     }
                 } catch (_: Exception) {
                 } finally {
@@ -392,6 +416,7 @@ fun AdvancedTelegramApp() {
                             run {
                                 val capKey = if (caption.isNotBlank()) caption else "[Photo]"
                                 globalRecentSentPhotos[capKey] = path
+                                globalRecentSentPhotos["${'$'}{activeChat.id}:${'$'}capKey"] = path
                                 sendRealMedia(activeChat.id, path, caption)
                             }
                             val keyCaption = if (caption.isNotBlank()) caption else "[Photo]"
