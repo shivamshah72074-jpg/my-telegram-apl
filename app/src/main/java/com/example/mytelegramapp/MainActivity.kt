@@ -55,7 +55,8 @@ data class ChatMessage(
     val id: Long,
     val sender: String,
     val text: String,
-    val isMine: Boolean
+    val isMine: Boolean,
+    val hasMedia: Boolean = false
 )
 
 data class UiConfig(
@@ -197,13 +198,15 @@ private suspend fun fetchRealMessages(chatId: Long): List<ChatMessage> = withCon
     for (i in 0 until arr.length()) {
         val obj = arr.getJSONObject(i)
         val txt = obj.optString("text", "").trim()
-        if (txt.isNotEmpty()) {
+        val hasMedia = obj.optBoolean("hasMedia", false)
+        if (txt.isNotEmpty() || hasMedia) {
             list.add(
                 ChatMessage(
                     id = obj.optLong("id", i.toLong() + 1L),
                     sender = obj.optString("sender", "User"),
-                    text = txt,
-                    isMine = obj.optBoolean("isMine", false)
+                    text = if (txt.isNotEmpty()) txt else "[Photo]",
+                    isMine = obj.optBoolean("isMine", false),
+                    hasMedia = hasMedia
                 )
             )
         }
