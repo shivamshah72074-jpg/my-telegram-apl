@@ -53,6 +53,25 @@ data class ChatItem(
 
 private val globalRecentSentPhotos = mutableStateMapOf<String, String>()
 
+private fun mergeSentPhotos(
+    fetched: List<ChatMessage>,
+    current: List<ChatMessage>
+): List<ChatMessage> {
+    val enriched = fetched.map { m ->
+        val savedPath = m.localPhotoPath ?: globalRecentSentPhotos[m.text]
+        if (m.hasMedia && savedPath != null) {
+            m.copy(localPhotoPath = savedPath)
+        } else {
+            m
+        }
+    }
+    val localOnly = current.filter { cur ->
+        cur.isMine && cur.hasMedia && cur.localPhotoPath != null &&
+            enriched.none { it.isMine && it.hasMedia && it.text == cur.text }
+    }
+    return enriched + localOnly
+}
+
 data class ChatMessage(
     val id: Long,
     val sender: String,
@@ -360,13 +379,7 @@ fun AdvancedTelegramApp() {
                 scope.launch {
                     try {
                         sendRealMessage(activeChat.id, text)
-                        messages = fetchRealMessages(activeChat.id).map { m ->
-        if (m.hasMedia && m.localPhotoPath == null && globalRecentSentPhotos.containsKey(m.text)) {
-            m.copy(localPhotoPath = globalRecentSentPhotos[m.text])
-        } else {
-            m
-        }
-    }
+                        messages = mergeSentPhotos(fetchRealMessages(activeChat.id), messages)
                     } catch (_: Exception) {
                     }
                 }
@@ -387,15 +400,13 @@ fun AdvancedTelegramApp() {
                                 hasMedia = true,
                                 localPhotoPath = path
                             )
-                            val fetched = fetchRealMessages(activeChat.id).map { m ->
-                                if (m.hasMedia && m.localPhotoPath == null && globalRecentSentPhotos.containsKey(m.text)) {
-                                    m.copy(localPhotoPath = globalRecentSentPhotos[m.text])
-                                } else {
-                                    m
-                                }
+                            val fetched = fetchRealMessages(activeChat.id)
+                            val baseList = if (fetched.any { it.isMine && it.hasMedia && it.text == keyCaption }) {
+                                fetched
+                            } else {
+                                fetched + localMsg
                             }
-                            val alreadyPresent = fetched.any { it.isMine && it.hasMedia && it.text == keyCaption }
-                            messages = if (alreadyPresent) fetched else (fetched + localMsg)
+                            messages = mergeSentPhotos(baseList, messages)
                             onDone("Sent")
                         } catch (e: Exception) {
                             onDone("Err: ${e.message ?: "send_file"}")
