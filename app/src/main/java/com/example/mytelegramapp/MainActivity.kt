@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.util.Base64
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -215,9 +216,12 @@ private suspend fun forwardRealMessage(fromChatId: Long, toChatId: Long, message
 }
 
 private suspend fun sendRealMedia(chatId: Long, filePath: String, caption: String) = withContext(Dispatchers.IO) {
+    val bytes = File(filePath).readBytes()
+    val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
     val body = JSONObject().apply {
         put("chatId", chatId)
         put("filePath", filePath)
+        put("fileBase64", b64)
         put("caption", caption)
     }.toString()
     httpPostJson("/send_file", body)
