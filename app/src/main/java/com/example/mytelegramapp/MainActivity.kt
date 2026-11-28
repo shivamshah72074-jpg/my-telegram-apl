@@ -246,13 +246,28 @@ private suspend fun fetchRealMessages(chatId: Long): List<ChatMessage> = withCon
         val txt = obj.optString("text", "").trim()
         val hasMedia = obj.optBoolean("hasMedia", false)
         if (txt.isNotEmpty() || hasMedia) {
+            val finalText = if (txt.isNotEmpty()) txt else "[Photo]"
+            val isMineMsg = obj.optBoolean("isMine", false)
+            val matchedPath = if (hasMedia) {
+                globalRecentSentPhotos["${chatId}:${finalText}"]
+                    ?: globalRecentSentPhotos[finalText]
+                    ?: if (isMineMsg) {
+                        globalRecentSentPhotos
+                            .filterKeys { it.startsWith("${chatId}:") }
+                            .values
+                            .lastOrNull { java.io.File(it).exists() }
+                            ?: globalRecentSentPhotos.values.lastOrNull { java.io.File(it).exists() }
+                    } else null
+            } else null
+            val validPath = matchedPath?.takeIf { java.io.File(it).exists() }
             list.add(
                 ChatMessage(
                     id = obj.optLong("id", i.toLong() + 1L),
                     sender = obj.optString("sender", "User"),
-                    text = if (txt.isNotEmpty()) txt else "[Photo]",
-                    isMine = obj.optBoolean("isMine", false),
-                    hasMedia = hasMedia
+                    text = finalText,
+                    isMine = isMineMsg,
+                    hasMedia = hasMedia,
+                    localPhotoPath = validPath
                 )
             )
         }
