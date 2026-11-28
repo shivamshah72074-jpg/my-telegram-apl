@@ -378,7 +378,7 @@ fun AdvancedTelegramApp() {
                                 localPhotoPath = path
                             )
                             val fetched = fetchRealMessages(activeChat.id)
-                            messages = if (fetched.any { it.hasMedia }) fetched else (fetched + localMsg)
+                            messages = fetched.filterNot { it.id == localMsg.id } + localMsg
                             onDone("Sent")
                         } catch (e: Exception) {
                             onDone("Err: ${e.message ?: "send_file"}")
