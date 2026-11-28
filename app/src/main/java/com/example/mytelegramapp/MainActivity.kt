@@ -69,29 +69,19 @@ private fun rememberSentPhoto(ctx: android.content.Context?, chatId: Long, capti
 }
 
 private fun lookupSentPhoto(ctx: android.content.Context?, chatId: Long, caption: String, isMineMsg: Boolean): String? {
-    val direct = globalRecentSentPhotos["${chatId}:${caption}"]
-        ?: globalRecentSentPhotos[caption]
-    if (direct != null && java.io.File(direct).exists()) return direct
+    val candidates = listOfNotNull(
+        globalRecentSentPhotos["${chatId}:${caption}"],
+        globalRecentSentPhotos[caption],
+        globalRecentSentPhotos["__LAST_SENT_PHOTO__"]
+    ) + globalRecentSentPhotos
+        .filterKeys { it.startsWith("${chatId}:") }
+        .values
+        .reversed() + globalRecentSentPhotos.values.reversed()
 
-    if (ctx != null) {
-        val prefs = ctx.getSharedPreferences("sent_photo_cache", android.content.Context.MODE_PRIVATE)
-        val pByCap = prefs.getString("photo_${chatId}_${caption.hashCode()}", null)
-        if (!pByCap.isNullOrBlank() && java.io.File(pByCap).exists()) return pByCap
-        if (isMineMsg) {
-            val pChat = prefs.getString("last_photo_${chatId}", null)
-            if (!pChat.isNullOrBlank() && java.io.File(pChat).exists()) return pChat
-            val pAny = prefs.getString("last_photo_any", null)
-            if (!pAny.isNullOrBlank() && java.io.File(pAny).exists()) return pAny
+    for (cand in candidates) {
+        if (cand.isNotBlank() && java.io.File(cand).exists()) {
+            return cand
         }
-    }
-
-    if (isMineMsg) {
-        val fallback = globalRecentSentPhotos
-            .filterKeys { it.startsWith("${chatId}:") }
-            .values
-            .lastOrNull { java.io.File(it).exists() }
-            ?: globalRecentSentPhotos.values.lastOrNull { java.io.File(it).exists() }
-        if (fallback != null) return fallback
     }
     return null
 }
@@ -467,7 +457,13 @@ fun AdvancedTelegramApp() {
                                 val capKey = if (caption.isNotBlank()) caption else "[Photo]"
                                 globalRecentSentPhotos[capKey] = path
                                 globalRecentSentPhotos["${'$'}{activeChat?.id ?: 0L}:${'$'}capKey"] = path
-                                sendRealMedia(activeChat?.id ?: 0L, path, caption)
+                                run {
+            val cKey = if (caption.isNotBlank()) caption else "[Photo]"
+            globalRecentSentPhotos[cKey] = path
+            globalRecentSentPhotos["${activeChat?.id ?: 0L}:$cKey"] = path
+            globalRecentSentPhotos["__LAST_SENT_PHOTO__"] = path
+            sendRealMedia(activeChat?.id ?: 0L, path, caption)
+        }
                             }
                             val keyCaption = if (caption.isNotBlank()) caption else "[Photo]"
                             globalRecentSentPhotos[keyCaption] = path
