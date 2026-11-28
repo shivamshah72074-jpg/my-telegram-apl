@@ -377,7 +377,7 @@ fun AdvancedTelegramApp() {
                 try {
                     val freshMsgs = fetchRealMessages(cid)
                     if (freshMsgs != messages) {
-                        messages = mergeSentPhotosForChat(activeChat.id, freshMsgs, messages)
+                        messages = mergeSentPhotosForChat(activeChat?.id ?: 0L, freshMsgs, messages)
                     }
                 } catch (_: Exception) {
                 } finally {
@@ -402,8 +402,8 @@ fun AdvancedTelegramApp() {
             onSendText = { text ->
                 scope.launch {
                     try {
-                        sendRealMessage(activeChat.id, text)
-                        messages = mergeSentPhotos(fetchRealMessages(activeChat.id), messages)
+                        sendRealMessage(activeChat?.id ?: 0L, text)
+                        messages = mergeSentPhotos(fetchRealMessages(activeChat?.id ?: 0L), messages)
                     } catch (_: Exception) {
                     }
                 }
@@ -416,8 +416,8 @@ fun AdvancedTelegramApp() {
                             run {
                                 val capKey = if (caption.isNotBlank()) caption else "[Photo]"
                                 globalRecentSentPhotos[capKey] = path
-                                globalRecentSentPhotos["${'$'}{activeChat.id}:${'$'}capKey"] = path
-                                sendRealMedia(activeChat.id, path, caption)
+                                globalRecentSentPhotos["${'$'}{activeChat?.id ?: 0L}:${'$'}capKey"] = path
+                                sendRealMedia(activeChat?.id ?: 0L, path, caption)
                             }
                             val keyCaption = if (caption.isNotBlank()) caption else "[Photo]"
                             globalRecentSentPhotos[keyCaption] = path
@@ -429,7 +429,7 @@ fun AdvancedTelegramApp() {
                                 hasMedia = true,
                                 localPhotoPath = path
                             )
-                            val fetched = fetchRealMessages(activeChat.id)
+                            val fetched = fetchRealMessages(activeChat?.id ?: 0L)
                             val baseList = if (fetched.any { it.isMine && it.hasMedia && it.text == keyCaption }) {
                                 fetched
                             } else {
@@ -455,14 +455,14 @@ fun AdvancedTelegramApp() {
                 title = { Text("Forward To...") },
                 text = {
                     LazyColumn(modifier = Modifier.heightIn(max = 320.dp)) {
-                        items(chats.filter { it.id != activeChat.id }, key = { it.id }) { dest ->
+                        items(chats.filter { it.id != activeChat?.id ?: 0L }, key = { it.id }) { dest ->
                             TextButton(
                                 onClick = {
                                     val msgToSend = targetMsg
                                     forwardingMsg = null
                                     scope.launch {
                                         try {
-                                            forwardRealMessage(activeChat.id, dest.id, msgToSend.id)
+                                            forwardRealMessage(activeChat?.id ?: 0L, dest.id, msgToSend.id)
                                         } catch (_: Exception) {
                                         }
                                     }
