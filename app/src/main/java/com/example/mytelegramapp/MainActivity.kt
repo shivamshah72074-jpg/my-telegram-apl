@@ -3,9 +3,12 @@ package com.example.mytelegramapp
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -47,6 +50,7 @@ data class ChatItem(
 )
 
 data class ChatMessage(
+    val id: Long,
     val sender: String,
     val text: String,
     val isMine: Boolean
@@ -84,7 +88,7 @@ private fun httpGet(path: String): String {
     val stream = if (code in 200..299) conn.inputStream else conn.errorStream
     val body = stream?.bufferedReader()?.use { it.readText() } ?: ""
     if (code !in 200..299) {
-        throw RuntimeException("HTTP $code:$body")
+        throw RuntimeException("HTTP $code: $body")
     }
     return body
 }
@@ -95,7 +99,7 @@ private fun httpPostJson(path: String, jsonBody: String): String {
         requestMethod = "POST"
         doOutput = true
         connectTimeout = 5000
-        readTimeout = 15000
+        readTimeout = 20000
         setRequestProperty("Content-Type", "application/json; charset=utf-8")
     }
     OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
@@ -106,9 +110,22 @@ private fun httpPostJson(path: String, jsonBody: String): String {
     val stream = if (code in 200..299) conn.inputStream else conn.errorStream
     val body = stream?.bufferedReader()?.use { it.readText() } ?: ""
     if (code !in 200..299) {
-        throw RuntimeException("HTTP $code:$body")
+        throw RuntimeException("HTTP $code: $body")
     }
     return body
+}
+
+private suspend fun copyUriToCache(context: Context, uri: Uri): String? = withContext(Dispatchers.IO) {
+    try {
+        val outDir = File(context.cacheDir, "media_out").apply { mkdirs() }
+        val outFile = File(outDir, "upload_${System.currentTimeMillis()}.jpg")
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            outFile.outputStream().use { output -> input.copyTo(output) }
+        }
+        if (outFile.exists() && outFile.length() > 0L) outFile.absolutePath else null
+    } catch (_: Exception) {
+        null
+    }
 }
 
 private suspend fun loadRemoteBitmap(context: Context, imageUrl: String, cacheName: String): Bitmap? =
@@ -129,11 +146,7 @@ private suspend fun loadRemoteBitmap(context: Context, imageUrl: String, cacheNa
             }
         } catch (_: Exception) {
         }
-        if (cacheFile.exists()) {
-            BitmapFactory.decodeFile(cacheFile.absolutePath)
-        } else {
-            null
-        }
+        if (cacheFile.exists()) BitmapFactory.decodeFile(cacheFile.absolutePath) else null
     }
 
 private suspend fun fetchUiConfig(): UiConfig = withContext(Dispatchers.IO) {
@@ -176,6 +189,7 @@ private suspend fun fetchRealMessages(chatId: Long): List<ChatMessage> = withCon
         if (txt.isNotEmpty()) {
             list.add(
                 ChatMessage(
+                    id = obj.optLong("id", i.toLong() + 1L),
                     sender = obj.optString("sender", "User"),
                     text = txt,
                     isMine = obj.optBoolean("isMine", false)
@@ -192,6 +206,31 @@ private suspend fun sendRealMessage(chatId: Long, text: String) = withContext(Di
         put("text", text)
     }.toString()
     httpPostJson("/send", body)
+}
+
+private suspend fun forwardRealMessage(fromChatId: Long, toChatId: Long, messageId: Long) = withContext(Dispatchers.IO) {
+    val body = JSONObject().apply {
+        put("fromChatId", fromChatId)
+        put("toChatId", toChatId)
+        put("messageId", messageId)
+    }.toString()
+    httpPostJson("/forward", body)
+}
+
+private suspend fun sendRealMedia(chatId: Long, filePath: String, caption: String) = withContext(Dispatchers.IO) {
+    val body = JSONObject().apply {
+        put("chatId", chatId)
+        put("filePath", filePath)
+        put("caption", caption)
+    }.toString()
+    httpPostJson("/send_file", body)
+}
+
+enum class MainTab(val label: String) {
+    CHATS("Chats"),
+    CONTACTS("Contacts"),
+    SETTINGS("Settings"),
+    PROFILE("Profile")
 }
 
 class MainActivity : ComponentActivity() {
@@ -218,13 +257,14 @@ fun AdvancedTelegramApp() {
     var uiConfig by remember { mutableStateOf(UiConfig()) }
     var homeBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var chatBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var selectedTab by remember { mutableStateOf(MainTab.CHATS) }
     var selectedChat by remember { mutableStateOf<ChatItem?>(null) }
-    var showSettings by remember { mutableStateOf(false) }
     var chats by remember { mutableStateOf<List<ChatItem>>(emptyList()) }
     var messages by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
     var isInitialChatsLoading by remember { mutableStateOf(true) }
     var isInitialMessagesLoading by remember { mutableStateOf(false) }
     var statusNotice by remember { mutableStateOf("Bridge: 127.0.0.1:8765") }
+    var forwardingMsg by remember { mutableStateOf<ChatMessage?>(null) }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -243,8 +283,8 @@ fun AdvancedTelegramApp() {
         }
     }
 
-    LaunchedEffect(selectedChat, showSettings, uiConfig.refreshMs) {
-        if (selectedChat == null && !showSettings) {
+    LaunchedEffect(selectedChat, selectedTab, uiConfig.refreshMs) {
+        if (selectedChat == null && (selectedTab == MainTab.CHATS || selectedTab == MainTab.CONTACTS)) {
             while (true) {
                 try {
                     val fresh = fetchRealChats()
@@ -279,62 +319,155 @@ fun AdvancedTelegramApp() {
     }
 
     val current = selectedChat
-    when {
-        current != null -> {
-            ChatDetailScreen(
-                chat = current,
-                messages = messages,
-                uiConfig = uiConfig,
-                chatBitmap = chatBitmap,
-                isLoading = isInitialMessagesLoading,
-                onBack = { selectedChat = null },
-                onSend = { text ->
-                    scope.launch {
+    if (current != null) {
+        ChatDetailScreen(
+            chat = current,
+            messages = messages,
+            uiConfig = uiConfig,
+            chatBitmap = chatBitmap,
+            isLoading = isInitialMessagesLoading,
+            onBack = { selectedChat = null },
+            onSendText = { text ->
+                scope.launch {
+                    try {
+                        sendRealMessage(current.id, text)
+                        messages = fetchRealMessages(current.id)
+                    } catch (_: Exception) {
+                    }
+                }
+            },
+            onSendUri = { uri, caption ->
+                scope.launch {
+                    val path = copyUriToCache(context, uri)
+                    if (path != null) {
                         try {
-                            sendRealMessage(current.id, text)
+                            sendRealMedia(current.id, path, caption)
                             messages = fetchRealMessages(current.id)
+                            statusNotice = "Media sent"
                         } catch (_: Exception) {
+                            statusNotice = "Media send failed"
                         }
                     }
                 }
-            )
-        }
-        showSettings -> {
-            TelegramSettingsScreen(
-                uiConfig = uiConfig,
-                homeBitmap = homeBitmap,
-                statusNotice = statusNotice,
-                chatCount = chats.size,
-                onBack = { showSettings = false },
-                onUpdateLocalConfig = { updated -> uiConfig = updated },
-                onClearWallpaperCache = {
-                    scope.launch(Dispatchers.IO) {
-                        File(context.cacheDir, "live_home_bg.png").delete()
-                        File(context.cacheDir, "live_chat_bg.png").delete()
-                        val h = loadRemoteBitmap(context, uiConfig.homeWallpaperUrl, "live_home_bg.png")
-                        val c = loadRemoteBitmap(context, uiConfig.chatWallpaperUrl, "live_chat_bg.png")
-                        withContext(Dispatchers.Main) {
-                            homeBitmap = h
-                            chatBitmap = c
-                            statusNotice = "Wallpaper cache refreshed"
+            },
+            onRequestForward = { msg -> forwardingMsg = msg }
+        )
+
+        val targetMsg = forwardingMsg
+        if (targetMsg != null) {
+            AlertDialog(
+                onDismissRequest = { forwardingMsg = null },
+                title = { Text("Forward To...") },
+                text = {
+                    LazyColumn(modifier = Modifier.heightIn(max = 320.dp)) {
+                        items(chats.filter { it.id != current.id }, key = { it.id }) { dest ->
+                            TextButton(
+                                onClick = {
+                                    val msgToSend = targetMsg
+                                    forwardingMsg = null
+                                    scope.launch {
+                                        try {
+                                            forwardRealMessage(current.id, dest.id, msgToSend.id)
+                                            statusNotice = "Forwarded to ${dest.title}"
+                                        } catch (_: Exception) {
+                                            statusNotice = "Forward failed"
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(dest.title, color = Color.White)
+                            }
                         }
                     }
+                },
+                confirmButton = {
+                    TextButton(onClick = { forwardingMsg = null }) { Text("Cancel") }
                 }
             )
         }
-        else -> {
-            ChatListScreen(
-                chats = chats,
-                uiConfig = uiConfig,
-                homeBitmap = homeBitmap,
-                isLoading = isInitialChatsLoading,
-                onOpenSettings = { showSettings = true },
-                onChatClick = { chat ->
-                    selectedChat = chat
-                    messages = emptyList()
-                    isInitialMessagesLoading = true
+    } else {
+        Scaffold(
+            bottomBar = {
+                NavigationBar(containerColor = Color(0xF20F172A)) {
+                    MainTab.entries.forEach { tab ->
+                        NavigationBarItem(
+                            selected = selectedTab == tab,
+                            onClick = { selectedTab = tab },
+                            label = { Text(tab.label, fontSize = 11.sp) },
+                            icon = {
+                                Box(
+                                    modifier = Modifier
+                                        .size(10.dp)
+                                        .clip(CircleShape)
+                                        .background(if (selectedTab == tab) Color(0xFF38BDF8) else Color(0xFF64748B))
+                                )
+                            }
+                        )
+                    }
                 }
-            )
+            },
+            containerColor = Color.Transparent
+        ) { navPadding ->
+            Box(modifier = Modifier.fillMaxSize().padding(navPadding)) {
+                when (selectedTab) {
+                    MainTab.CHATS -> {
+                        ChatListScreen(
+                            chats = chats,
+                            uiConfig = uiConfig,
+                            homeBitmap = homeBitmap,
+                            isLoading = isInitialChatsLoading,
+                            onChatClick = { chat ->
+                                selectedChat = chat
+                                messages = emptyList()
+                                isInitialMessagesLoading = true
+                            }
+                        )
+                    }
+                    MainTab.CONTACTS -> {
+                        ContactsScreen(
+                            chats = chats,
+                            uiConfig = uiConfig,
+                            homeBitmap = homeBitmap,
+                            onOpenChat = { chat ->
+                                selectedChat = chat
+                                messages = emptyList()
+                                isInitialMessagesLoading = true
+                            }
+                        )
+                    }
+                    MainTab.SETTINGS -> {
+                        TelegramSettingsScreen(
+                            uiConfig = uiConfig,
+                            homeBitmap = homeBitmap,
+                            statusNotice = statusNotice,
+                            chatCount = chats.size,
+                            onUpdateLocalConfig = { updated -> uiConfig = updated },
+                            onClearWallpaperCache = {
+                                scope.launch(Dispatchers.IO) {
+                                    File(context.cacheDir, "live_home_bg.png").delete()
+                                    File(context.cacheDir, "live_chat_bg.png").delete()
+                                    val h = loadRemoteBitmap(context, uiConfig.homeWallpaperUrl, "live_home_bg.png")
+                                    val c = loadRemoteBitmap(context, uiConfig.chatWallpaperUrl, "live_chat_bg.png")
+                                    withContext(Dispatchers.Main) {
+                                        homeBitmap = h
+                                        chatBitmap = c
+                                        statusNotice = "Wallpaper cache refreshed"
+                                    }
+                                }
+                            }
+                        )
+                    }
+                    MainTab.PROFILE -> {
+                        ProfileScreen(
+                            uiConfig = uiConfig,
+                            homeBitmap = homeBitmap,
+                            statusNotice = statusNotice,
+                            chatCount = chats.size
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -346,9 +479,17 @@ fun ChatListScreen(
     uiConfig: UiConfig,
     homeBitmap: Bitmap?,
     isLoading: Boolean,
-    onOpenSettings: () -> Unit,
     onChatClick: (ChatItem) -> Unit
 ) {
+    var query by remember { mutableStateOf("") }
+    val filtered = remember(chats, query) {
+        if (query.isBlank()) chats
+        else chats.filter {
+            it.title.contains(query.trim(), ignoreCase = true) ||
+                it.lastMessage.contains(query.trim(), ignoreCase = true)
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -364,11 +505,6 @@ fun ChatListScreen(
                         Text(uiConfig.appTitle, fontWeight = FontWeight.Bold, color = Color.White)
                     }
                 },
-                actions = {
-                    TextButton(onClick = onOpenSettings) {
-                        Text("Settings", color = Color(0xFFBAE6FD), fontWeight = FontWeight.SemiBold)
-                    }
-                },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = uiConfig.topBarColor)
             )
         },
@@ -380,27 +516,108 @@ fun ChatListScreen(
             } else {
                 Image(painter = painterResource(id = R.drawable.home_theme), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             }
-            if (isLoading && chats.isEmpty()) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = Color.White)
+
+            Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(uiConfig.cardColor, RoundedCornerShape(12.dp)),
+                    placeholder = { Text("Search chats...") },
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+
+                if (isLoading && chats.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = Color.White)
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(filtered, key = { it.id }) { chat ->
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(uiConfig.cardColor, RoundedCornerShape(12.dp))
+                                    .clickable { onChatClick(chat) }
+                                    .padding(12.dp)
+                            ) {
+                                Text(chat.title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                if (chat.lastMessage.isNotBlank()) {
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(chat.lastMessage, color = Color(0xFFE2E8F0), fontSize = 13.sp, maxLines = 2)
+                                }
+                            }
+                        }
+                    }
                 }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ContactsScreen(
+    chats: List<ChatItem>,
+    uiConfig: UiConfig,
+    homeBitmap: Bitmap?,
+    onOpenChat: (ChatItem) -> Unit
+) {
+    var search by remember { mutableStateOf("") }
+    val list = remember(chats, search) {
+        if (search.isBlank()) chats
+        else chats.filter { it.title.contains(search.trim(), ignoreCase = true) }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Contacts & Chats", color = Color.White, fontWeight = FontWeight.Bold) },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = uiConfig.topBarColor)
+            )
+        },
+        containerColor = Color.Transparent
+    ) { padding ->
+        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+            if (homeBitmap != null) {
+                Image(bitmap = homeBitmap.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize().padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    items(chats, key = { it.id }) { chat ->
-                        Column(
+                Image(painter = painterResource(id = R.drawable.home_theme), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            }
+            Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
+                OutlinedTextField(
+                    value = search,
+                    onValueChange = { search = it },
+                    modifier = Modifier.fillMaxWidth().background(uiConfig.cardColor, RoundedCornerShape(12.dp)),
+                    placeholder = { Text("Search contacts...") },
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(list, key = { it.id }) { item ->
+                        Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .background(uiConfig.cardColor, RoundedCornerShape(12.dp))
-                                .clickable { onChatClick(chat) }
-                                .padding(12.dp)
+                                .clickable { onOpenChat(item) }
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(chat.title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                            if (chat.lastMessage.isNotBlank()) {
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(chat.lastMessage, color = Color(0xFFE2E8F0), fontSize = 13.sp, maxLines = 2)
+                            Box(
+                                modifier = Modifier.size(38.dp).clip(CircleShape).background(Color(0xFF0284C7)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(item.title.take(1).uppercase(), color = Color.White, fontWeight = FontWeight.Bold)
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(item.title, color = Color.White, fontWeight = FontWeight.Bold)
+                                Text(item.type, color = Color(0xFF93C5FD), fontSize = 12.sp)
                             }
                         }
                     }
@@ -417,7 +634,6 @@ fun TelegramSettingsScreen(
     homeBitmap: Bitmap?,
     statusNotice: String,
     chatCount: Int,
-    onBack: () -> Unit,
     onUpdateLocalConfig: (UiConfig) -> Unit,
     onClearWallpaperCache: () -> Unit
 ) {
@@ -431,9 +647,6 @@ fun TelegramSettingsScreen(
         topBar = {
             TopAppBar(
                 title = { Text("Settings", color = Color.White, fontWeight = FontWeight.Bold) },
-                navigationIcon = {
-                    TextButton(onClick = onBack) { Text("<- Back", color = Color(0xFFBAE6FD)) }
-                },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = uiConfig.topBarColor)
             )
         },
@@ -450,30 +663,12 @@ fun TelegramSettingsScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().background(uiConfig.cardColor, RoundedCornerShape(14.dp)).padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Image(
-                            painter = painterResource(id = R.drawable.app_logo),
-                            contentDescription = null,
-                            modifier = Modifier.size(54.dp).clip(CircleShape),
-                            contentScale = ContentScale.Crop
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column {
-                            Text(uiConfig.appTitle, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                            Text(statusNotice, color = Color(0xFF93C5FD), fontSize = 12.sp)
-                            Text("Loaded Chats: $chatCount", color = Color(0xFFCBD5E1), fontSize = 12.sp)
-                        }
-                    }
-                }
-                item {
                     Column(
                         modifier = Modifier.fillMaxWidth().background(uiConfig.cardColor, RoundedCornerShape(14.dp)).padding(14.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Text("Account & Appearance", color = Color(0xFF7DD3FC), fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Text("Appearance & Sync", color = Color(0xFF7DD3FC), fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Text("$statusNotice | Chats: $chatCount", color = Color(0xFFCBD5E1), fontSize = 12.sp)
                         OutlinedTextField(
                             value = titleDraft,
                             onValueChange = { titleDraft = it },
@@ -493,10 +688,7 @@ fun TelegramSettingsScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("Telegram Blue Bubbles", color = Color.White, fontWeight = FontWeight.SemiBold)
-                                Text("Blue vs Emerald outgoing bubbles", color = Color(0xFFCBD5E1), fontSize = 12.sp)
-                            }
+                            Text("Telegram Blue Bubbles", color = Color.White, fontWeight = FontWeight.SemiBold)
                             Switch(
                                 checked = blueBubblesEnabled,
                                 onCheckedChange = { checked ->
@@ -505,23 +697,12 @@ fun TelegramSettingsScreen(
                                 }
                             )
                         }
-                    }
-                }
-                item {
-                    Column(
-                        modifier = Modifier.fillMaxWidth().background(uiConfig.cardColor, RoundedCornerShape(14.dp)).padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Text("Data & Storage", color = Color(0xFF7DD3FC), fontWeight = FontWeight.Bold, fontSize = 14.sp)
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("Fast Live Sync (1s)", color = Color.White, fontWeight = FontWeight.SemiBold)
-                                Text("OFF keeps 3s to save battery", color = Color(0xFFCBD5E1), fontSize = 12.sp)
-                            }
+                            Text("Fast Live Sync (1s)", color = Color.White, fontWeight = FontWeight.SemiBold)
                             Switch(
                                 checked = fastSyncEnabled,
                                 onCheckedChange = { checked ->
@@ -542,6 +723,55 @@ fun TelegramSettingsScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+fun ProfileScreen(
+    uiConfig: UiConfig,
+    homeBitmap: Bitmap?,
+    statusNotice: String,
+    chatCount: Int
+) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Profile", color = Color.White, fontWeight = FontWeight.Bold) },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = uiConfig.topBarColor)
+            )
+        },
+        containerColor = Color.Transparent
+    ) { padding ->
+        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+            if (homeBitmap != null) {
+                Image(bitmap = homeBitmap.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            } else {
+                Image(painter = painterResource(id = R.drawable.home_theme), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            }
+            Column(
+                modifier = Modifier.fillMaxSize().padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().background(uiConfig.cardColor, RoundedCornerShape(14.dp)).padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Image(
+                        painter = painterResource(id = R.drawable.app_logo),
+                        contentDescription = null,
+                        modifier = Modifier.size(64.dp).clip(CircleShape),
+                        contentScale = ContentScale.Crop
+                    )
+                    Spacer(modifier = Modifier.width(14.dp))
+                    Column {
+                        Text(uiConfig.appTitle, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 19.sp)
+                        Text(statusNotice, color = Color(0xFF93C5FD), fontSize = 12.sp)
+                        Text("Active Chats: $chatCount", color = Color(0xFFCBD5E1), fontSize = 12.sp)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
 fun ChatDetailScreen(
     chat: ChatItem,
     messages: List<ChatMessage>,
@@ -549,10 +779,20 @@ fun ChatDetailScreen(
     chatBitmap: Bitmap?,
     isLoading: Boolean,
     onBack: () -> Unit,
-    onSend: (String) -> Unit
+    onSendText: (String) -> Unit,
+    onSendUri: (Uri, String) -> Unit,
+    onRequestForward: (ChatMessage) -> Unit
 ) {
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
+    val mediaPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            onSendUri(uri, inputText.trim())
+            inputText = ""
+        }
+    }
 
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) listState.scrollToItem(messages.lastIndex)
@@ -573,6 +813,13 @@ fun ChatDetailScreen(
                 modifier = Modifier.fillMaxWidth().background(Color(0xE60F172A)).padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                OutlinedButton(
+                    onClick = { mediaPicker.launch("image/*") },
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
+                ) {
+                    Text("Media", color = Color(0xFF7DD3FC), fontSize = 12.sp)
+                }
+                Spacer(modifier = Modifier.width(6.dp))
                 OutlinedTextField(
                     value = inputText,
                     onValueChange = { inputText = it },
@@ -580,12 +827,12 @@ fun ChatDetailScreen(
                     placeholder = { Text("Message likhein...") },
                     singleLine = true
                 )
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(6.dp))
                 Button(
                     onClick = {
                         val trimmed = inputText.trim()
                         if (trimmed.isNotEmpty()) {
-                            onSend(trimmed)
+                            onSendText(trimmed)
                             inputText = ""
                         }
                     }
@@ -627,6 +874,7 @@ fun ChatDetailScreen(
                                             bottomEnd = if (msg.isMine) 2.dp else 12.dp
                                         )
                                     )
+                                    .clickable { onRequestForward(msg) }
                                     .padding(horizontal = 12.dp, vertical = 8.dp)
                             ) {
                                 if (!msg.isMine) {
@@ -634,6 +882,8 @@ fun ChatDetailScreen(
                                     Spacer(modifier = Modifier.height(2.dp))
                                 }
                                 Text(msg.text, color = Color.White, fontSize = 14.sp)
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text("Tap to forward", color = Color(0xFFCBD5E1), fontSize = 10.sp)
                             }
                         }
                     }
