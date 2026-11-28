@@ -353,7 +353,7 @@ fun AdvancedTelegramApp() {
                 try {
                     val freshMsgs = fetchRealMessages(cid)
                     if (freshMsgs != messages) {
-                        messages = freshMsgs
+                        messages = mergeSentPhotos(freshMsgs, messages)
                     }
                 } catch (_: Exception) {
                 } finally {
@@ -389,7 +389,11 @@ fun AdvancedTelegramApp() {
                     val path = copyUriToCache(context, uri)
                     if (path != null) {
                         try {
-                            sendRealMedia(activeChat.id, path, caption)
+                            run {
+                                val capKey = if (caption.isNotBlank()) caption else "[Photo]"
+                                globalRecentSentPhotos[capKey] = path
+                                sendRealMedia(activeChat.id, path, caption)
+                            }
                             val keyCaption = if (caption.isNotBlank()) caption else "[Photo]"
                             globalRecentSentPhotos[keyCaption] = path
                             val localMsg = ChatMessage(
