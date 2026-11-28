@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -87,9 +88,7 @@ private fun httpGet(path: String): String {
     val code = conn.responseCode
     val stream = if (code in 200..299) conn.inputStream else conn.errorStream
     val body = stream?.bufferedReader()?.use { it.readText() } ?: ""
-    if (code !in 200..299) {
-        throw RuntimeException("HTTP $code: $body")
-    }
+    if (code !in 200..299) throw RuntimeException("HTTP $code: $body")
     return body
 }
 
@@ -99,7 +98,7 @@ private fun httpPostJson(path: String, jsonBody: String): String {
         requestMethod = "POST"
         doOutput = true
         connectTimeout = 5000
-        readTimeout = 20000
+        readTimeout = 25000
         setRequestProperty("Content-Type", "application/json; charset=utf-8")
     }
     OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
@@ -109,9 +108,7 @@ private fun httpPostJson(path: String, jsonBody: String): String {
     val code = conn.responseCode
     val stream = if (code in 200..299) conn.inputStream else conn.errorStream
     val body = stream?.bufferedReader()?.use { it.readText() } ?: ""
-    if (code !in 200..299) {
-        throw RuntimeException("HTTP $code: $body")
-    }
+    if (code !in 200..299) throw RuntimeException("HTTP $code: $body")
     return body
 }
 
@@ -257,14 +254,21 @@ fun AdvancedTelegramApp() {
     var uiConfig by remember { mutableStateOf(UiConfig()) }
     var homeBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var chatBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var selectedTab by remember { mutableStateOf(MainTab.CHATS) }
-    var selectedChat by remember { mutableStateOf<ChatItem?>(null) }
+    var selectedTab by rememberSaveable { mutableStateOf(MainTab.CHATS) }
+    var selectedChatId by rememberSaveable { mutableStateOf<Long?>(null) }
+    var selectedChatTitle by rememberSaveable { mutableStateOf("") }
     var chats by remember { mutableStateOf<List<ChatItem>>(emptyList()) }
     var messages by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
     var isInitialChatsLoading by remember { mutableStateOf(true) }
     var isInitialMessagesLoading by remember { mutableStateOf(false) }
     var statusNotice by remember { mutableStateOf("Bridge: 127.0.0.1:8765") }
     var forwardingMsg by remember { mutableStateOf<ChatMessage?>(null) }
+
+    val activeChat = remember(selectedChatId, selectedChatTitle, chats) {
+        val cid = selectedChatId
+        if (cid == null) null
+        else chats.find { it.id == cid } ?: ChatItem(cid, selectedChatTitle.ifBlank { "Chat" }, "Chat", "")
+    }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -279,12 +283,12 @@ fun AdvancedTelegramApp() {
             } catch (_: Exception) {
                 statusNotice = "Bridge Offline - Start bridge_server.py"
             }
-            delay(1500L)
+            delay(2000L)
         }
     }
 
-    LaunchedEffect(selectedChat, selectedTab, uiConfig.refreshMs) {
-        if (selectedChat == null && (selectedTab == MainTab.CHATS || selectedTab == MainTab.CONTACTS)) {
+    LaunchedEffect(selectedChatId, selectedTab, uiConfig.refreshMs) {
+        if (selectedChatId == null && (selectedTab == MainTab.CHATS || selectedTab == MainTab.CONTACTS)) {
             while (true) {
                 try {
                     val fresh = fetchRealChats()
@@ -300,12 +304,12 @@ fun AdvancedTelegramApp() {
         }
     }
 
-    LaunchedEffect(selectedChat?.id, uiConfig.refreshMs) {
-        val active = selectedChat
-        if (active != null) {
+    LaunchedEffect(selectedChatId, uiConfig.refreshMs) {
+        val cid = selectedChatId
+        if (cid != null) {
             while (true) {
                 try {
-                    val freshMsgs = fetchRealMessages(active.id)
+                    val freshMsgs = fetchRealMessages(cid)
                     if (freshMsgs != messages) {
                         messages = freshMsgs
                     }
@@ -318,35 +322,39 @@ fun AdvancedTelegramApp() {
         }
     }
 
-    val current = selectedChat
-    if (current != null) {
+    if (activeChat != null) {
         ChatDetailScreen(
-            chat = current,
+            chat = activeChat,
             messages = messages,
             uiConfig = uiConfig,
             chatBitmap = chatBitmap,
             isLoading = isInitialMessagesLoading,
-            onBack = { selectedChat = null },
+            onBack = {
+                selectedChatId = null
+                selectedChatTitle = ""
+            },
             onSendText = { text ->
                 scope.launch {
                     try {
-                        sendRealMessage(current.id, text)
-                        messages = fetchRealMessages(current.id)
+                        sendRealMessage(activeChat.id, text)
+                        messages = fetchRealMessages(activeChat.id)
                     } catch (_: Exception) {
                     }
                 }
             },
-            onSendUri = { uri, caption ->
+            onSendUri = { uri, caption, onDone ->
                 scope.launch {
                     val path = copyUriToCache(context, uri)
                     if (path != null) {
                         try {
-                            sendRealMedia(current.id, path, caption)
-                            messages = fetchRealMessages(current.id)
-                            statusNotice = "Media sent"
-                        } catch (_: Exception) {
-                            statusNotice = "Media send failed"
+                            sendRealMedia(activeChat.id, path, caption)
+                            messages = fetchRealMessages(activeChat.id)
+                            onDone("Sent")
+                        } catch (e: Exception) {
+                            onDone("Err: ${e.message ?: "send_file"}")
                         }
+                    } else {
+                        onDone("File copy failed")
                     }
                 }
             },
@@ -360,17 +368,15 @@ fun AdvancedTelegramApp() {
                 title = { Text("Forward To...") },
                 text = {
                     LazyColumn(modifier = Modifier.heightIn(max = 320.dp)) {
-                        items(chats.filter { it.id != current.id }, key = { it.id }) { dest ->
+                        items(chats.filter { it.id != activeChat.id }, key = { it.id }) { dest ->
                             TextButton(
                                 onClick = {
                                     val msgToSend = targetMsg
                                     forwardingMsg = null
                                     scope.launch {
                                         try {
-                                            forwardRealMessage(current.id, dest.id, msgToSend.id)
-                                            statusNotice = "Forwarded to ${dest.title}"
+                                            forwardRealMessage(activeChat.id, dest.id, msgToSend.id)
                                         } catch (_: Exception) {
-                                            statusNotice = "Forward failed"
                                         }
                                     }
                                 },
@@ -418,7 +424,8 @@ fun AdvancedTelegramApp() {
                             homeBitmap = homeBitmap,
                             isLoading = isInitialChatsLoading,
                             onChatClick = { chat ->
-                                selectedChat = chat
+                                selectedChatId = chat.id
+                                selectedChatTitle = chat.title
                                 messages = emptyList()
                                 isInitialMessagesLoading = true
                             }
@@ -430,7 +437,8 @@ fun AdvancedTelegramApp() {
                             uiConfig = uiConfig,
                             homeBitmap = homeBitmap,
                             onOpenChat = { chat ->
-                                selectedChat = chat
+                                selectedChatId = chat.id
+                                selectedChatTitle = chat.title
                                 messages = emptyList()
                                 isInitialMessagesLoading = true
                             }
@@ -481,7 +489,7 @@ fun ChatListScreen(
     isLoading: Boolean,
     onChatClick: (ChatItem) -> Unit
 ) {
-    var query by remember { mutableStateOf("") }
+    var query by rememberSaveable { mutableStateOf("") }
     val filtered = remember(chats, query) {
         if (query.isBlank()) chats
         else chats.filter {
@@ -568,7 +576,7 @@ fun ContactsScreen(
     homeBitmap: Bitmap?,
     onOpenChat: (ChatItem) -> Unit
 ) {
-    var search by remember { mutableStateOf("") }
+    var search by rememberSaveable { mutableStateOf("") }
     val list = remember(chats, search) {
         if (search.isBlank()) chats
         else chats.filter { it.title.contains(search.trim(), ignoreCase = true) }
@@ -780,17 +788,21 @@ fun ChatDetailScreen(
     isLoading: Boolean,
     onBack: () -> Unit,
     onSendText: (String) -> Unit,
-    onSendUri: (Uri, String) -> Unit,
+    onSendUri: (Uri, String, (String) -> Unit) -> Unit,
     onRequestForward: (ChatMessage) -> Unit
 ) {
-    var inputText by remember { mutableStateOf("") }
+    var inputText by rememberSaveable { mutableStateOf("") }
+    var pendingUri by remember { mutableStateOf<Uri?>(null) }
+    var isSendingMedia by remember { mutableStateOf(false) }
+    var mediaStatus by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
+
     val mediaPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         if (uri != null) {
-            onSendUri(uri, inputText.trim())
-            inputText = ""
+            pendingUri = uri
+            mediaStatus = "Photo ready to send"
         }
     }
 
@@ -801,7 +813,14 @@ fun ChatDetailScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(chat.title, color = Color.White, fontSize = 17.sp) },
+                title = {
+                    Column {
+                        Text(chat.title, color = Color.White, fontSize = 17.sp)
+                        if (mediaStatus.isNotBlank()) {
+                            Text(mediaStatus, color = Color(0xFF7DD3FC), fontSize = 11.sp)
+                        }
+                    }
+                },
                 navigationIcon = {
                     TextButton(onClick = onBack) { Text("<- Back", color = Color(0xFFBAE6FD)) }
                 },
@@ -809,34 +828,81 @@ fun ChatDetailScreen(
             )
         },
         bottomBar = {
-            Row(
-                modifier = Modifier.fillMaxWidth().background(Color(0xE60F172A)).padding(8.dp),
-                verticalAlignment = Alignment.CenterVertically
+            Column(
+                modifier = Modifier.fillMaxWidth().background(Color(0xF20F172A)).padding(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                OutlinedButton(
-                    onClick = { mediaPicker.launch("image/*") },
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
-                ) {
-                    Text("Media", color = Color(0xFF7DD3FC), fontSize = 12.sp)
-                }
-                Spacer(modifier = Modifier.width(6.dp))
-                OutlinedTextField(
-                    value = inputText,
-                    onValueChange = { inputText = it },
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text("Message likhein...") },
-                    singleLine = true
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Button(
-                    onClick = {
-                        val trimmed = inputText.trim()
-                        if (trimmed.isNotEmpty()) {
-                            onSendText(trimmed)
-                            inputText = ""
+                val picked = pendingUri
+                if (picked != null) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF1E293B), RoundedCornerShape(10.dp))
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (isSendingMedia) "Sending photo..." else "Photo selected",
+                            color = Color(0xFF7DD3FC),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Row {
+                            TextButton(
+                                enabled = !isSendingMedia,
+                                onClick = {
+                                    pendingUri = null
+                                    mediaStatus = ""
+                                }
+                            ) { Text("Cancel", color = Color(0xFFFCA5A5), fontSize = 12.sp) }
+                            Button(
+                                enabled = !isSendingMedia,
+                                onClick = {
+                                    val cap = inputText.trim()
+                                    isSendingMedia = true
+                                    mediaStatus = "Uploading..."
+                                    onSendUri(picked, cap) { res ->
+                                        isSendingMedia = false
+                                        pendingUri = null
+                                        inputText = ""
+                                        mediaStatus = res
+                                    }
+                                }
+                            ) { Text(if (isSendingMedia) "..." else "Send Photo", fontSize = 12.sp) }
                         }
                     }
-                ) { Text("Send") }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton(
+                        onClick = { mediaPicker.launch("image/*") },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
+                    ) {
+                        Text("Media", color = Color(0xFF7DD3FC), fontSize = 12.sp)
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                    OutlinedTextField(
+                        value = inputText,
+                        onValueChange = { inputText = it },
+                        modifier = Modifier.weight(1f),
+                        placeholder = { Text(if (picked != null) "Caption likhein..." else "Message likhein...") },
+                        singleLine = true
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Button(
+                        onClick = {
+                            val trimmed = inputText.trim()
+                            if (trimmed.isNotEmpty()) {
+                                onSendText(trimmed)
+                                inputText = ""
+                            }
+                        }
+                    ) { Text("Send") }
+                }
             }
         },
         containerColor = Color.Transparent
