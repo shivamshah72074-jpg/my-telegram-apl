@@ -435,7 +435,7 @@ fun AdvancedTelegramApp() {
                             } else {
                                 fetched + localMsg
                             }
-                            messages = mergeSentPhotos(baseList, messages)
+                            messages = mergeSentPhotosForChat(activeChat?.id ?: 0L, baseList, messages)
                             onDone("Sent")
                         } catch (e: Exception) {
                             onDone("Err: ${e.message ?: "send_file"}")
