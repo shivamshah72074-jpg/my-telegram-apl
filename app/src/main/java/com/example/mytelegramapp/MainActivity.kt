@@ -117,8 +117,21 @@ private suspend fun copyUriToCache(context: Context, uri: Uri): String? = withCo
     try {
         val outDir = File(context.cacheDir, "media_out").apply { mkdirs() }
         val outFile = File(outDir, "upload_${System.currentTimeMillis()}.jpg")
-        context.contentResolver.openInputStream(uri)?.use { input ->
-            outFile.outputStream().use { output -> input.copyTo(output) }
+        val rawBytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return@withContext null
+        val orig = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size)
+        if (orig != null) {
+            val maxDim = 1280
+            val scale = minOf(1f, maxDim.toFloat() / maxOf(orig.width, orig.height).coerceAtLeast(1))
+            val targetW = (orig.width * scale).toInt().coerceAtLeast(1)
+            val targetH = (orig.height * scale).toInt().coerceAtLeast(1)
+            val scaled = if (scale < 1f) Bitmap.createScaledBitmap(orig, targetW, targetH, true) else orig
+            outFile.outputStream().use { out ->
+                scaled.compress(Bitmap.CompressFormat.JPEG, 80, out)
+            }
+            if (scaled !== orig) scaled.recycle()
+            orig.recycle()
+        } else {
+            outFile.writeBytes(rawBytes)
         }
         if (outFile.exists() && outFile.length() > 0L) outFile.absolutePath else null
     } catch (_: Exception) {
