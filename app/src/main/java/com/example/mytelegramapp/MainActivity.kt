@@ -99,7 +99,7 @@ private fun httpPostJson(path: String, jsonBody: String): String {
         requestMethod = "POST"
         doOutput = true
         connectTimeout = 5000
-        readTimeout = 25000
+        readTimeout = 90000
         setRequestProperty("Content-Type", "application/json; charset=utf-8")
     }
     OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
