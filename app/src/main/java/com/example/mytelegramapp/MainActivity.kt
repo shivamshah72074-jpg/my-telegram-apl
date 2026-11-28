@@ -367,6 +367,13 @@ fun AdvancedTelegramApp() {
     var messages by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
     var isInitialChatsLoading by remember { mutableStateOf(true) }
     var isInitialMessagesLoading by remember { mutableStateOf(false) }
+    var showLoginDialog by remember { mutableStateOf(false) }
+    var activeSessionToken by remember {
+        mutableStateOf(
+            context.getSharedPreferences("tg_multi_auth", android.content.Context.MODE_PRIVATE)
+                .getString("session_token", "") ?: ""
+        )
+    }
     var statusNotice by remember { mutableStateOf("Bridge: 127.0.0.1:8765") }
     var forwardingMsg by remember { mutableStateOf<ChatMessage?>(null) }
 
@@ -1109,4 +1116,217 @@ fun ChatDetailScreen(
             }
         }
     }
+}
+
+
+@Composable
+fun AdvancedTelegramAuthHost(
+    showDialog: Boolean,
+    onShowChange: (Boolean) -> Unit,
+    onTokenSaved: (String, String) -> Unit
+) {
+    if (showDialog) {
+        MultiUserAuthDialog(
+            onAuthenticated = { token, phone ->
+                onTokenSaved(token, phone)
+                onShowChange(false)
+            },
+            onDismiss = { onShowChange(false) }
+        )
+    }
+}
+
+// === MULTI_USER_AUTH_UI_BLOCK ===
+@Composable
+fun MultiUserAuthDialog(
+    baseUrl: String = "http://127.0.0.1:8765",
+    onAuthenticated: (token: String, phone: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val prefs = remember { context.getSharedPreferences("tg_multi_auth", android.content.Context.MODE_PRIVATE) }
+    val scope = rememberCoroutineScope()
+
+    var phoneInput by remember { mutableStateOf(prefs.getString("last_phone", "+91") ?: "+91") }
+    var otpInput by remember { mutableStateOf("") }
+    var twoFaInput by remember { mutableStateOf("") }
+    var authToken by remember { mutableStateOf(prefs.getString("session_token", "") ?: "") }
+    var phoneCodeHash by remember { mutableStateOf("") }
+    var step by remember { mutableIntStateOf(1) } // 1=Phone, 2=OTP, 3=2FA
+    var statusText by remember { mutableStateOf("") }
+    var isLoading by remember { mutableStateOf(false) }
+
+    fun postJson(path: String, jsonBody: String, onResult: (Int, String) -> Unit) {
+        isLoading = true
+        statusText = ""
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            try {
+                val url = java.net.URL("$baseUrl$path")
+                val conn = (url.openConnection() as java.net.HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 15000
+                    readTimeout = 20000
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json")
+                }
+                conn.outputStream.use { it.write(jsonBody.toByteArray(Charsets.UTF_8)) }
+                val code = conn.responseCode
+                val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+                val body = stream?.bufferedReader()?.use { it.readText() } ?: ""
+                conn.disconnect()
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    isLoading = false
+                    onResult(code, body)
+                }
+            } catch (e: Exception) {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    isLoading = false
+                    statusText = "Network error: ${e.message}"
+                }
+            }
+        }
+    }
+
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = { if (!isLoading) onDismiss() },
+        title = {
+            androidx.compose.material3.Text(
+                when (step) {
+                    1 -> "Telegram Login (Phone)"
+                    2 -> "Enter OTP Code"
+                    else -> "Two-Step Verification (2FA)"
+                }
+            )
+        },
+        text = {
+            androidx.compose.foundation.layout.Column(
+                verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp)
+            ) {
+                when (step) {
+                    1 -> {
+                        androidx.compose.material3.OutlinedTextField(
+                            value = phoneInput,
+                            onValueChange = { phoneInput = it },
+                            label = { androidx.compose.material3.Text("Phone (+91...)") },
+                            singleLine = true
+                        )
+                    }
+                    2 -> {
+                        androidx.compose.material3.Text("OTP sent to $phoneInput")
+                        androidx.compose.material3.OutlinedTextField(
+                            value = otpInput,
+                            onValueChange = { otpInput = it },
+                            label = { androidx.compose.material3.Text("OTP Code") },
+                            singleLine = true
+                        )
+                    }
+                    else -> {
+                        androidx.compose.material3.OutlinedTextField(
+                            value = twoFaInput,
+                            onValueChange = { twoFaInput = it },
+                            label = { androidx.compose.material3.Text("2FA Password") },
+                            singleLine = true
+                        )
+                    }
+                }
+
+                if (statusText.isNotEmpty()) {
+                    androidx.compose.material3.Text(
+                        text = statusText,
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            androidx.compose.material3.Button(
+                enabled = !isLoading,
+                onClick = {
+                    when (step) {
+                        1 -> {
+                            val cleanPhone = phoneInput.trim()
+                            val payload = org.json.JSONObject().put("phone", cleanPhone).toString()
+                            postJson("/auth/send-code", payload) { _, body ->
+                                val obj = runCatching { org.json.JSONObject(body) }.getOrNull()
+                                if (obj?.optBoolean("ok") == true) {
+                                    authToken = obj.optString("token", "")
+                                    phoneCodeHash = obj.optString("phone_code_hash", "")
+                                    prefs.edit().putString("last_phone", cleanPhone).apply()
+                                    step = 2
+                                } else {
+                                    statusText = obj?.optString("error") ?: body.ifEmpty { "Failed to send OTP" }
+                                }
+                            }
+                        }
+                        2 -> {
+                            val payload = org.json.JSONObject()
+                                .put("token", authToken)
+                                .put("phone", phoneInput.trim())
+                                .put("code", otpInput.trim())
+                                .put("phone_code_hash", phoneCodeHash)
+                                .toString()
+                            postJson("/auth/sign-in", payload) { _, body ->
+                                val obj = runCatching { org.json.JSONObject(body) }.getOrNull()
+                                when {
+                                    obj?.optBoolean("ok") == true -> {
+                                        val finalToken = obj.optString("token", authToken)
+                                        prefs.edit()
+                                            .putString("session_token", finalToken)
+                                            .putString("last_phone", phoneInput.trim())
+                                            .apply()
+                                        onAuthenticated(finalToken, phoneInput.trim())
+                                    }
+                                    obj?.optBoolean("2fa_required") == true -> {
+                                        authToken = obj.optString("token", authToken)
+                                        step = 3
+                                    }
+                                    else -> {
+                                        statusText = obj?.optString("error") ?: body.ifEmpty { "OTP sign-in failed" }
+                                    }
+                                }
+                            }
+                        }
+                        else -> {
+                            val payload = org.json.JSONObject()
+                                .put("token", authToken)
+                                .put("password", twoFaInput)
+                                .toString()
+                            postJson("/auth/2fa", payload) { _, body ->
+                                val obj = runCatching { org.json.JSONObject(body) }.getOrNull()
+                                if (obj?.optBoolean("ok") == true) {
+                                    val finalToken = obj.optString("token", authToken)
+                                    prefs.edit()
+                                        .putString("session_token", finalToken)
+                                        .putString("last_phone", phoneInput.trim())
+                                        .apply()
+                                    onAuthenticated(finalToken, phoneInput.trim())
+                                } else {
+                                    statusText = obj?.optString("error") ?: body.ifEmpty { "2FA verification failed" }
+                                }
+                            }
+                        }
+                    }
+                }
+            ) {
+                androidx.compose.material3.Text(
+                    when {
+                        isLoading -> "Please wait..."
+                        step == 1 -> "Send OTP"
+                        step == 2 -> "Verify OTP"
+                        else -> "Verify 2FA"
+                    }
+                )
+            }
+        },
+        dismissButton = {
+            androidx.compose.material3.TextButton(
+                enabled = !isLoading,
+                onClick = {
+                    if (step > 1) step -= 1 else onDismiss()
+                }
+            ) {
+                androidx.compose.material3.Text(if (step > 1) "Back" else "Cancel")
+            }
+        }
+    )
 }
