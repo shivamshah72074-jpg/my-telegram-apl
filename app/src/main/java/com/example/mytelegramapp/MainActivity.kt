@@ -534,7 +534,18 @@ fun AdvancedTelegramApp() {
         }
     } else {
         Scaffold(
-            bottomBar = {
+            floatingActionButton = {
+                        androidx.compose.material3.ExtendedFloatingActionButton(
+                            onClick = { showLoginDialog = true },
+                            text = {
+                                androidx.compose.material3.Text(
+                                    if (activeSessionToken.isNotEmpty()) "Switch Account" else "Login (OTP)"
+                                )
+                            },
+                            icon = {}
+                        )
+                    },
+                    bottomBar = {
                 NavigationBar(containerColor = Color(0xF20F172A)) {
                     MainTab.entries.forEach { tab ->
                         NavigationBarItem(
