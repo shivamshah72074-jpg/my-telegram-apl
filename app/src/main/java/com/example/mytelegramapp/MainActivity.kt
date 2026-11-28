@@ -53,6 +53,49 @@ data class ChatItem(
 
 private val globalRecentSentPhotos = mutableStateMapOf<String, String>()
 
+private fun rememberSentPhoto(ctx: android.content.Context?, chatId: Long, caption: String, path: String) {
+    val cleanPath = path.trim()
+    if (cleanPath.isEmpty()) return
+    globalRecentSentPhotos[caption] = cleanPath
+    globalRecentSentPhotos["${chatId}:${caption}"] = cleanPath
+    if (ctx != null) {
+        val prefs = ctx.getSharedPreferences("sent_photo_cache", android.content.Context.MODE_PRIVATE)
+        prefs.edit()
+            .putString("photo_${chatId}_${caption.hashCode()}", cleanPath)
+            .putString("last_photo_${chatId}", cleanPath)
+            .putString("last_photo_any", cleanPath)
+            .apply()
+    }
+}
+
+private fun lookupSentPhoto(ctx: android.content.Context?, chatId: Long, caption: String, isMineMsg: Boolean): String? {
+    val direct = globalRecentSentPhotos["${chatId}:${caption}"]
+        ?: globalRecentSentPhotos[caption]
+    if (direct != null && java.io.File(direct).exists()) return direct
+
+    if (ctx != null) {
+        val prefs = ctx.getSharedPreferences("sent_photo_cache", android.content.Context.MODE_PRIVATE)
+        val pByCap = prefs.getString("photo_${chatId}_${caption.hashCode()}", null)
+        if (!pByCap.isNullOrBlank() && java.io.File(pByCap).exists()) return pByCap
+        if (isMineMsg) {
+            val pChat = prefs.getString("last_photo_${chatId}", null)
+            if (!pChat.isNullOrBlank() && java.io.File(pChat).exists()) return pChat
+            val pAny = prefs.getString("last_photo_any", null)
+            if (!pAny.isNullOrBlank() && java.io.File(pAny).exists()) return pAny
+        }
+    }
+
+    if (isMineMsg) {
+        val fallback = globalRecentSentPhotos
+            .filterKeys { it.startsWith("${chatId}:") }
+            .values
+            .lastOrNull { java.io.File(it).exists() }
+            ?: globalRecentSentPhotos.values.lastOrNull { java.io.File(it).exists() }
+        if (fallback != null) return fallback
+    }
+    return null
+}
+
 private fun mergeSentPhotosForChat(
     chatId: Long,
     fetched: List<ChatMessage>,
@@ -249,15 +292,7 @@ private suspend fun fetchRealMessages(chatId: Long): List<ChatMessage> = withCon
             val finalText = if (txt.isNotEmpty()) txt else "[Photo]"
             val isMineMsg = obj.optBoolean("isMine", false)
             val matchedPath = if (hasMedia) {
-                globalRecentSentPhotos["${chatId}:${finalText}"]
-                    ?: globalRecentSentPhotos[finalText]
-                    ?: if (isMineMsg) {
-                        globalRecentSentPhotos
-                            .filterKeys { it.startsWith("${chatId}:") }
-                            .values
-                            .lastOrNull { java.io.File(it).exists() }
-                            ?: globalRecentSentPhotos.values.lastOrNull { java.io.File(it).exists() }
-                    } else null
+                lookupSentPhoto(null, chatId, finalText, isMineMsg)
             } else null
             val validPath = matchedPath?.takeIf { java.io.File(it).exists() }
             list.add(
