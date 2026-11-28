@@ -368,7 +368,16 @@ fun AdvancedTelegramApp() {
                     if (path != null) {
                         try {
                             sendRealMedia(activeChat.id, path, caption)
-                            messages = fetchRealMessages(activeChat.id)
+                            val localMsg = ChatMessage(
+                                id = -System.currentTimeMillis(),
+                                sender = "Me",
+                                text = if (caption.isNotBlank()) caption else "[Photo]",
+                                isMine = true,
+                                hasMedia = true,
+                                localPhotoPath = path
+                            )
+                            val fetched = fetchRealMessages(activeChat.id)
+                            messages = if (fetched.any { it.hasMedia }) fetched else (fetched + localMsg)
                             onDone("Sent")
                         } catch (e: Exception) {
                             onDone("Err: ${e.message ?: "send_file"}")
@@ -943,7 +952,7 @@ fun ChatDetailScreen(
                     modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(messages) { msg ->
+                    items(messages, key = { it.id }) { msg ->
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = if (msg.isMine) Arrangement.End else Arrangement.Start
@@ -966,6 +975,22 @@ fun ChatDetailScreen(
                                 if (!msg.isMine) {
                                     Text(msg.sender, color = Color(0xFF7DD3FC), fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                     Spacer(modifier = Modifier.height(2.dp))
+                                }
+                                val pPath = msg.localPhotoPath
+                                if (pPath != null && File(pPath).exists()) {
+                                    val bmp = remember(pPath) { BitmapFactory.decodeFile(pPath) }
+                                    if (bmp != null) {
+                                        Image(
+                                            bitmap = bmp.asImageBitmap(),
+                                            contentDescription = "Sent photo",
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .heightIn(min = 120.dp, max = 210.dp)
+                                                .clip(RoundedCornerShape(8.dp)),
+                                            contentScale = ContentScale.Crop
+                                        )
+                                        Spacer(modifier = Modifier.height(6.dp))
+                                    }
                                 }
                                 Text(msg.text, color = Color.White, fontSize = 14.sp)
                                 Spacer(modifier = Modifier.height(2.dp))
