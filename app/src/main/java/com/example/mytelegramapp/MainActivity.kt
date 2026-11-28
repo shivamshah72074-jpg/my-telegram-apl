@@ -358,7 +358,13 @@ fun AdvancedTelegramApp() {
                 scope.launch {
                     try {
                         sendRealMessage(activeChat.id, text)
-                        messages = fetchRealMessages(activeChat.id)
+                        messages = fetchRealMessages(activeChat.id).map { m ->
+        if (m.hasMedia && m.localPhotoPath == null && recentSentPhotos.containsKey(m.text)) {
+            m.copy(localPhotoPath = recentSentPhotos[m.text])
+        } else {
+            m
+        }
+    }
                     } catch (_: Exception) {
                     }
                 }
@@ -369,16 +375,25 @@ fun AdvancedTelegramApp() {
                     if (path != null) {
                         try {
                             sendRealMedia(activeChat.id, path, caption)
+                            val keyCaption = if (caption.isNotBlank()) caption else "[Photo]"
+                            recentSentPhotos[keyCaption] = path
                             val localMsg = ChatMessage(
                                 id = -System.currentTimeMillis(),
                                 sender = "Me",
-                                text = if (caption.isNotBlank()) caption else "[Photo]",
+                                text = keyCaption,
                                 isMine = true,
                                 hasMedia = true,
                                 localPhotoPath = path
                             )
-                            val fetched = fetchRealMessages(activeChat.id)
-                            messages = fetched.filterNot { it.id == localMsg.id } + localMsg
+                            val fetched = fetchRealMessages(activeChat.id).map { m ->
+                                if (m.hasMedia && m.localPhotoPath == null && recentSentPhotos.containsKey(m.text)) {
+                                    m.copy(localPhotoPath = recentSentPhotos[m.text])
+                                } else {
+                                    m
+                                }
+                            }
+                            val alreadyPresent = fetched.any { it.isMine && it.hasMedia && it.text == keyCaption }
+                            messages = if (alreadyPresent) fetched else (fetched + localMsg)
                             onDone("Sent")
                         } catch (e: Exception) {
                             onDone("Err: ${e.message ?: "send_file"}")
