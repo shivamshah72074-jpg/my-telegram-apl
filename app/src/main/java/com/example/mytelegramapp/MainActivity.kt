@@ -51,6 +51,8 @@ data class ChatItem(
     val lastMessage: String
 )
 
+private val globalRecentSentPhotos = mutableStateMapOf<String, String>()
+
 data class ChatMessage(
     val id: Long,
     val sender: String,
@@ -359,8 +361,8 @@ fun AdvancedTelegramApp() {
                     try {
                         sendRealMessage(activeChat.id, text)
                         messages = fetchRealMessages(activeChat.id).map { m ->
-        if (m.hasMedia && m.localPhotoPath == null && recentSentPhotos.containsKey(m.text)) {
-            m.copy(localPhotoPath = recentSentPhotos[m.text])
+        if (m.hasMedia && m.localPhotoPath == null && globalRecentSentPhotos.containsKey(m.text)) {
+            m.copy(localPhotoPath = globalRecentSentPhotos[m.text])
         } else {
             m
         }
@@ -376,7 +378,7 @@ fun AdvancedTelegramApp() {
                         try {
                             sendRealMedia(activeChat.id, path, caption)
                             val keyCaption = if (caption.isNotBlank()) caption else "[Photo]"
-                            recentSentPhotos[keyCaption] = path
+                            globalRecentSentPhotos[keyCaption] = path
                             val localMsg = ChatMessage(
                                 id = -System.currentTimeMillis(),
                                 sender = "Me",
@@ -386,8 +388,8 @@ fun AdvancedTelegramApp() {
                                 localPhotoPath = path
                             )
                             val fetched = fetchRealMessages(activeChat.id).map { m ->
-                                if (m.hasMedia && m.localPhotoPath == null && recentSentPhotos.containsKey(m.text)) {
-                                    m.copy(localPhotoPath = recentSentPhotos[m.text])
+                                if (m.hasMedia && m.localPhotoPath == null && globalRecentSentPhotos.containsKey(m.text)) {
+                                    m.copy(localPhotoPath = globalRecentSentPhotos[m.text])
                                 } else {
                                     m
                                 }
