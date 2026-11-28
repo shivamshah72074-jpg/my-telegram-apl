@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
-    <application
+    <application android:roundIcon="@mipmap/ic_launcher_round" android:icon="@mipmap/ic_launcher"
         android:allowBackup="true"
         android:label="My Telegram App"
         android:theme="@android:style/Theme.Material.NoActionBar"
