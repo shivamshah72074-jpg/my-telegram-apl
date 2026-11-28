@@ -1,5 +1,8 @@
 package com.example.mytelegramapp
 
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -10,13 +13,17 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -27,6 +34,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
@@ -50,6 +58,8 @@ data class UiConfig(
     val cardColor: Color = Color(0xB3111827),
     val mineBubbleColor: Color = Color(0xE61D4ED8),
     val otherBubbleColor: Color = Color(0xE61F2937),
+    val homeWallpaperUrl: String = "",
+    val chatWallpaperUrl: String = "",
     val refreshMs: Long = 1000L
 )
 
@@ -74,7 +84,7 @@ private fun httpGet(path: String): String {
     val stream = if (code in 200..299) conn.inputStream else conn.errorStream
     val body = stream?.bufferedReader()?.use { it.readText() } ?: ""
     if (code !in 200..299) {
-        throw RuntimeException("HTTP $code: $body")
+        throw RuntimeException("HTTP $code:$body")
     }
     return body
 }
@@ -96,10 +106,35 @@ private fun httpPostJson(path: String, jsonBody: String): String {
     val stream = if (code in 200..299) conn.inputStream else conn.errorStream
     val body = stream?.bufferedReader()?.use { it.readText() } ?: ""
     if (code !in 200..299) {
-        throw RuntimeException("HTTP $code: $body")
+        throw RuntimeException("HTTP $code:$body")
     }
     return body
 }
+
+private suspend fun loadRemoteBitmap(context: Context, imageUrl: String, cacheName: String): Bitmap? =
+    withContext(Dispatchers.IO) {
+        if (imageUrl.isBlank()) return@withContext null
+        val cacheFile = File(context.cacheDir, cacheName)
+        try {
+            val conn = (URL(imageUrl).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 4000
+                readTimeout = 8000
+            }
+            if (conn.responseCode in 200..299) {
+                val bytes = conn.inputStream.use { it.readBytes() }
+                if (bytes.isNotEmpty()) {
+                    cacheFile.writeBytes(bytes)
+                    return@withContext BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                }
+            }
+        } catch (_: Exception) {
+        }
+        if (cacheFile.exists()) {
+            BitmapFactory.decodeFile(cacheFile.absolutePath)
+        } else {
+            null
+        }
+    }
 
 private suspend fun fetchUiConfig(): UiConfig = withContext(Dispatchers.IO) {
     val raw = httpGet("/ui")
@@ -111,6 +146,8 @@ private suspend fun fetchUiConfig(): UiConfig = withContext(Dispatchers.IO) {
         cardColor = parseColorSafe(obj.optString("cardColor", ""), def.cardColor),
         mineBubbleColor = parseColorSafe(obj.optString("mineBubbleColor", ""), def.mineBubbleColor),
         otherBubbleColor = parseColorSafe(obj.optString("otherBubbleColor", ""), def.otherBubbleColor),
+        homeWallpaperUrl = obj.optString("homeWallpaperUrl", ""),
+        chatWallpaperUrl = obj.optString("chatWallpaperUrl", ""),
         refreshMs = obj.optLong("refreshMs", def.refreshMs).coerceAtLeast(500L)
     )
 }
@@ -176,13 +213,18 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun AdvancedTelegramApp() {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var uiConfig by remember { mutableStateOf(UiConfig()) }
+    var homeBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var chatBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var selectedChat by remember { mutableStateOf<ChatItem?>(null) }
+    var showSettings by remember { mutableStateOf(false) }
     var chats by remember { mutableStateOf<List<ChatItem>>(emptyList()) }
     var messages by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
     var isInitialChatsLoading by remember { mutableStateOf(true) }
     var isInitialMessagesLoading by remember { mutableStateOf(false) }
+    var statusNotice by remember { mutableStateOf("Bridge: 127.0.0.1:8765") }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -190,15 +232,19 @@ fun AdvancedTelegramApp() {
                 val freshUi = fetchUiConfig()
                 if (freshUi != uiConfig) {
                     uiConfig = freshUi
+                    homeBitmap = loadRemoteBitmap(context, freshUi.homeWallpaperUrl, "live_home_bg.png")
+                    chatBitmap = loadRemoteBitmap(context, freshUi.chatWallpaperUrl, "live_chat_bg.png")
                 }
+                statusNotice = "Connected (127.0.0.1:8765)"
             } catch (_: Exception) {
+                statusNotice = "Bridge Offline - Start bridge_server.py"
             }
-            delay(1000L)
+            delay(1500L)
         }
     }
 
-    LaunchedEffect(selectedChat, uiConfig.refreshMs) {
-        if (selectedChat == null) {
+    LaunchedEffect(selectedChat, showSettings, uiConfig.refreshMs) {
+        if (selectedChat == null && !showSettings) {
             while (true) {
                 try {
                     val fresh = fetchRealChats()
@@ -233,34 +279,63 @@ fun AdvancedTelegramApp() {
     }
 
     val current = selectedChat
-    if (current == null) {
-        ChatListScreen(
-            chats = chats,
-            uiConfig = uiConfig,
-            isLoading = isInitialChatsLoading,
-            onChatClick = { chat ->
-                selectedChat = chat
-                messages = emptyList()
-                isInitialMessagesLoading = true
-            }
-        )
-    } else {
-        ChatDetailScreen(
-            chat = current,
-            messages = messages,
-            uiConfig = uiConfig,
-            isLoading = isInitialMessagesLoading,
-            onBack = { selectedChat = null },
-            onSend = { text ->
-                scope.launch {
-                    try {
-                        sendRealMessage(current.id, text)
-                        messages = fetchRealMessages(current.id)
-                    } catch (_: Exception) {
+    when {
+        current != null -> {
+            ChatDetailScreen(
+                chat = current,
+                messages = messages,
+                uiConfig = uiConfig,
+                chatBitmap = chatBitmap,
+                isLoading = isInitialMessagesLoading,
+                onBack = { selectedChat = null },
+                onSend = { text ->
+                    scope.launch {
+                        try {
+                            sendRealMessage(current.id, text)
+                            messages = fetchRealMessages(current.id)
+                        } catch (_: Exception) {
+                        }
                     }
                 }
-            }
-        )
+            )
+        }
+        showSettings -> {
+            TelegramSettingsScreen(
+                uiConfig = uiConfig,
+                homeBitmap = homeBitmap,
+                statusNotice = statusNotice,
+                chatCount = chats.size,
+                onBack = { showSettings = false },
+                onUpdateLocalConfig = { updated -> uiConfig = updated },
+                onClearWallpaperCache = {
+                    scope.launch(Dispatchers.IO) {
+                        File(context.cacheDir, "live_home_bg.png").delete()
+                        File(context.cacheDir, "live_chat_bg.png").delete()
+                        val h = loadRemoteBitmap(context, uiConfig.homeWallpaperUrl, "live_home_bg.png")
+                        val c = loadRemoteBitmap(context, uiConfig.chatWallpaperUrl, "live_chat_bg.png")
+                        withContext(Dispatchers.Main) {
+                            homeBitmap = h
+                            chatBitmap = c
+                            statusNotice = "Wallpaper cache refreshed"
+                        }
+                    }
+                }
+            )
+        }
+        else -> {
+            ChatListScreen(
+                chats = chats,
+                uiConfig = uiConfig,
+                homeBitmap = homeBitmap,
+                isLoading = isInitialChatsLoading,
+                onOpenSettings = { showSettings = true },
+                onChatClick = { chat ->
+                    selectedChat = chat
+                    messages = emptyList()
+                    isInitialMessagesLoading = true
+                }
+            )
+        }
     }
 }
 
@@ -269,7 +344,9 @@ fun AdvancedTelegramApp() {
 fun ChatListScreen(
     chats: List<ChatItem>,
     uiConfig: UiConfig,
+    homeBitmap: Bitmap?,
     isLoading: Boolean,
+    onOpenSettings: () -> Unit,
     onChatClick: (ChatItem) -> Unit
 ) {
     Scaffold(
@@ -280,45 +357,36 @@ fun ChatListScreen(
                         Image(
                             painter = painterResource(id = R.drawable.app_logo),
                             contentDescription = "App Logo",
-                            modifier = Modifier.size(30.dp),
+                            modifier = Modifier.size(30.dp).clip(CircleShape),
                             contentScale = ContentScale.Crop
                         )
                         Spacer(modifier = Modifier.width(10.dp))
                         Text(uiConfig.appTitle, fontWeight = FontWeight.Bold, color = Color.White)
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = uiConfig.topBarColor,
-                    titleContentColor = Color.White
-                )
+                actions = {
+                    TextButton(onClick = onOpenSettings) {
+                        Text("Settings", color = Color(0xFFBAE6FD), fontWeight = FontWeight.SemiBold)
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = uiConfig.topBarColor)
             )
         },
         containerColor = Color.Transparent
     ) { padding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-        ) {
-            Image(
-                painter = painterResource(id = R.drawable.home_theme),
-                contentDescription = "Home Theme",
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
-            )
-
+        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+            if (homeBitmap != null) {
+                Image(bitmap = homeBitmap.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            } else {
+                Image(painter = painterResource(id = R.drawable.home_theme), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            }
             if (isLoading && chats.isEmpty()) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(color = Color.White)
                 }
             } else {
                 LazyColumn(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(12.dp),
+                    modifier = Modifier.fillMaxSize().padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     items(chats, key = { it.id }) { chat ->
@@ -344,10 +412,141 @@ fun ChatListScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+fun TelegramSettingsScreen(
+    uiConfig: UiConfig,
+    homeBitmap: Bitmap?,
+    statusNotice: String,
+    chatCount: Int,
+    onBack: () -> Unit,
+    onUpdateLocalConfig: (UiConfig) -> Unit,
+    onClearWallpaperCache: () -> Unit
+) {
+    var titleDraft by remember(uiConfig.appTitle) { mutableStateOf(uiConfig.appTitle) }
+    var fastSyncEnabled by remember(uiConfig.refreshMs) { mutableStateOf(uiConfig.refreshMs <= 1000L) }
+    var blueBubblesEnabled by remember(uiConfig.mineBubbleColor) {
+        mutableStateOf(uiConfig.mineBubbleColor == Color(0xE61D4ED8))
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Settings", color = Color.White, fontWeight = FontWeight.Bold) },
+                navigationIcon = {
+                    TextButton(onClick = onBack) { Text("<- Back", color = Color(0xFFBAE6FD)) }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = uiConfig.topBarColor)
+            )
+        },
+        containerColor = Color.Transparent
+    ) { padding ->
+        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+            if (homeBitmap != null) {
+                Image(bitmap = homeBitmap.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            } else {
+                Image(painter = painterResource(id = R.drawable.home_theme), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            }
+            LazyColumn(
+                modifier = Modifier.fillMaxSize().padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().background(uiConfig.cardColor, RoundedCornerShape(14.dp)).padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Image(
+                            painter = painterResource(id = R.drawable.app_logo),
+                            contentDescription = null,
+                            modifier = Modifier.size(54.dp).clip(CircleShape),
+                            contentScale = ContentScale.Crop
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(uiConfig.appTitle, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                            Text(statusNotice, color = Color(0xFF93C5FD), fontSize = 12.sp)
+                            Text("Loaded Chats: $chatCount", color = Color(0xFFCBD5E1), fontSize = 12.sp)
+                        }
+                    }
+                }
+                item {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().background(uiConfig.cardColor, RoundedCornerShape(14.dp)).padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text("Account & Appearance", color = Color(0xFF7DD3FC), fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        OutlinedTextField(
+                            value = titleDraft,
+                            onValueChange = { titleDraft = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("App Header Title") },
+                            singleLine = true
+                        )
+                        Button(
+                            onClick = {
+                                val clean = titleDraft.trim()
+                                if (clean.isNotEmpty()) onUpdateLocalConfig(uiConfig.copy(appTitle = clean))
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Apply Title") }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Telegram Blue Bubbles", color = Color.White, fontWeight = FontWeight.SemiBold)
+                                Text("Blue vs Emerald outgoing bubbles", color = Color(0xFFCBD5E1), fontSize = 12.sp)
+                            }
+                            Switch(
+                                checked = blueBubblesEnabled,
+                                onCheckedChange = { checked ->
+                                    blueBubblesEnabled = checked
+                                    onUpdateLocalConfig(uiConfig.copy(mineBubbleColor = if (checked) Color(0xE61D4ED8) else Color(0xE6047857)))
+                                }
+                            )
+                        }
+                    }
+                }
+                item {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().background(uiConfig.cardColor, RoundedCornerShape(14.dp)).padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text("Data & Storage", color = Color(0xFF7DD3FC), fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Fast Live Sync (1s)", color = Color.White, fontWeight = FontWeight.SemiBold)
+                                Text("OFF keeps 3s to save battery", color = Color(0xFFCBD5E1), fontSize = 12.sp)
+                            }
+                            Switch(
+                                checked = fastSyncEnabled,
+                                onCheckedChange = { checked ->
+                                    fastSyncEnabled = checked
+                                    onUpdateLocalConfig(uiConfig.copy(refreshMs = if (checked) 1000L else 3000L))
+                                }
+                            )
+                        }
+                        OutlinedButton(onClick = onClearWallpaperCache, modifier = Modifier.fillMaxWidth()) {
+                            Text("Reload Live Wallpapers", color = Color.White)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
 fun ChatDetailScreen(
     chat: ChatItem,
     messages: List<ChatMessage>,
     uiConfig: UiConfig,
+    chatBitmap: Bitmap?,
     isLoading: Boolean,
     onBack: () -> Unit,
     onSend: (String) -> Unit
@@ -356,9 +555,7 @@ fun ChatDetailScreen(
     val listState = rememberLazyListState()
 
     LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
-            listState.scrollToItem(messages.lastIndex)
-        }
+        if (messages.isNotEmpty()) listState.scrollToItem(messages.lastIndex)
     }
 
     Scaffold(
@@ -366,19 +563,14 @@ fun ChatDetailScreen(
             TopAppBar(
                 title = { Text(chat.title, color = Color.White, fontSize = 17.sp) },
                 navigationIcon = {
-                    TextButton(onClick = onBack) {
-                        Text("← Back", color = Color(0xFFBAE6FD))
-                    }
+                    TextButton(onClick = onBack) { Text("<- Back", color = Color(0xFFBAE6FD)) }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = uiConfig.topBarColor)
             )
         },
         bottomBar = {
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xE60F172A))
-                    .padding(8.dp),
+                modifier = Modifier.fillMaxWidth().background(Color(0xE60F172A)).padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 OutlinedTextField(
@@ -397,38 +589,25 @@ fun ChatDetailScreen(
                             inputText = ""
                         }
                     }
-                ) {
-                    Text("Send")
-                }
+                ) { Text("Send") }
             }
         },
         containerColor = Color.Transparent
     ) { padding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-        ) {
-            Image(
-                painter = painterResource(id = R.drawable.chat_theme),
-                contentDescription = "Chat Theme",
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
-            )
-
+        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+            if (chatBitmap != null) {
+                Image(bitmap = chatBitmap.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            } else {
+                Image(painter = painterResource(id = R.drawable.chat_theme), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            }
             if (isLoading && messages.isEmpty()) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(color = Color(0xFF0F172A))
                 }
             } else {
                 LazyColumn(
                     state = listState,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     items(messages) { msg ->
@@ -451,12 +630,7 @@ fun ChatDetailScreen(
                                     .padding(horizontal = 12.dp, vertical = 8.dp)
                             ) {
                                 if (!msg.isMine) {
-                                    Text(
-                                        msg.sender,
-                                        color = Color(0xFF7DD3FC),
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
+                                    Text(msg.sender, color = Color(0xFF7DD3FC), fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                     Spacer(modifier = Modifier.height(2.dp))
                                 }
                                 Text(msg.text, color = Color.White, fontSize = 14.sp)
