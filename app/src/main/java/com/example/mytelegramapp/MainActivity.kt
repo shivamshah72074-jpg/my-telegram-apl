@@ -3,6 +3,7 @@ package com.example.mytelegramapp
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -15,6 +16,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -43,11 +46,10 @@ data class ChatMessage(
 
 data class UiConfig(
     val appTitle: String = "Advanced Telegram",
-    val topBarColor: Color = Color(0xFF1F2937),
-    val bgColor: Color = Color(0xFF121212),
-    val cardColor: Color = Color(0xFF1E1E1E),
-    val mineBubbleColor: Color = Color(0xFF1D4ED8),
-    val otherBubbleColor: Color = Color(0xFF262626),
+    val topBarColor: Color = Color(0xCC0F172A),
+    val cardColor: Color = Color(0xB3111827),
+    val mineBubbleColor: Color = Color(0xE61D4ED8),
+    val otherBubbleColor: Color = Color(0xE61F2937),
     val refreshMs: Long = 1000L
 )
 
@@ -106,7 +108,6 @@ private suspend fun fetchUiConfig(): UiConfig = withContext(Dispatchers.IO) {
     UiConfig(
         appTitle = obj.optString("appTitle", def.appTitle),
         topBarColor = parseColorSafe(obj.optString("topBarColor", ""), def.topBarColor),
-        bgColor = parseColorSafe(obj.optString("bgColor", ""), def.bgColor),
         cardColor = parseColorSafe(obj.optString("cardColor", ""), def.cardColor),
         mineBubbleColor = parseColorSafe(obj.optString("mineBubbleColor", ""), def.mineBubbleColor),
         otherBubbleColor = parseColorSafe(obj.optString("otherBubbleColor", ""), def.otherBubbleColor),
@@ -162,9 +163,9 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme(
                 colorScheme = darkColorScheme(
-                    background = Color(0xFF121212),
-                    surface = Color(0xFF1E1E1E),
-                    primary = Color(0xFF2563EB)
+                    background = Color(0xFF0F172A),
+                    surface = Color(0xFF1E293B),
+                    primary = Color(0xFF0284C7)
                 )
             ) {
                 AdvancedTelegramApp()
@@ -274,46 +275,65 @@ fun ChatListScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(uiConfig.appTitle, fontWeight = FontWeight.Bold) },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Image(
+                            painter = painterResource(id = R.drawable.app_logo),
+                            contentDescription = "App Logo",
+                            modifier = Modifier.size(30.dp),
+                            contentScale = ContentScale.Crop
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(uiConfig.appTitle, fontWeight = FontWeight.Bold, color = Color.White)
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = uiConfig.topBarColor,
                     titleContentColor = Color.White
                 )
             )
         },
-        containerColor = uiConfig.bgColor
+        containerColor = Color.Transparent
     ) { padding ->
-        if (isLoading && chats.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(uiConfig.bgColor)
-                    .padding(padding),
-                contentAlignment = Alignment.Center
-            ) {
-                CircularProgressIndicator()
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(uiConfig.bgColor)
-                    .padding(padding)
-                    .padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(chats, key = { it.id }) { chat ->
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(uiConfig.cardColor, RoundedCornerShape(10.dp))
-                            .clickable { onChatClick(chat) }
-                            .padding(12.dp)
-                    ) {
-                        Text(chat.title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                        if (chat.lastMessage.isNotBlank()) {
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(chat.lastMessage, color = Color(0xFF9CA3AF), fontSize = 13.sp, maxLines = 2)
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+        ) {
+            Image(
+                painter = painterResource(id = R.drawable.home_theme),
+                contentDescription = "Home Theme",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
+
+            if (isLoading && chats.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(color = Color.White)
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(chats, key = { it.id }) { chat ->
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(uiConfig.cardColor, RoundedCornerShape(12.dp))
+                                .clickable { onChatClick(chat) }
+                                .padding(12.dp)
+                        ) {
+                            Text(chat.title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                            if (chat.lastMessage.isNotBlank()) {
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(chat.lastMessage, color = Color(0xFFE2E8F0), fontSize = 13.sp, maxLines = 2)
+                            }
                         }
                     }
                 }
@@ -347,7 +367,7 @@ fun ChatDetailScreen(
                 title = { Text(chat.title, color = Color.White, fontSize = 17.sp) },
                 navigationIcon = {
                     TextButton(onClick = onBack) {
-                        Text("← Back", color = Color(0xFF93C5FD))
+                        Text("← Back", color = Color(0xFFBAE6FD))
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = uiConfig.topBarColor)
@@ -357,7 +377,7 @@ fun ChatDetailScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(Color(0xFF1A1A1A))
+                    .background(Color(0xE60F172A))
                     .padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -382,57 +402,65 @@ fun ChatDetailScreen(
                 }
             }
         },
-        containerColor = uiConfig.bgColor
+        containerColor = Color.Transparent
     ) { padding ->
-        if (isLoading && messages.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(uiConfig.bgColor)
-                    .padding(padding),
-                contentAlignment = Alignment.Center
-            ) {
-                CircularProgressIndicator()
-            }
-        } else {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(uiConfig.bgColor)
-                    .padding(padding)
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(messages) { msg ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = if (msg.isMine) Arrangement.End else Arrangement.Start
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .widthIn(max = 290.dp)
-                                .background(
-                                    if (msg.isMine) uiConfig.mineBubbleColor else uiConfig.otherBubbleColor,
-                                    RoundedCornerShape(
-                                        topStart = 12.dp,
-                                        topEnd = 12.dp,
-                                        bottomStart = if (msg.isMine) 12.dp else 2.dp,
-                                        bottomEnd = if (msg.isMine) 2.dp else 12.dp
-                                    )
-                                )
-                                .padding(horizontal = 12.dp, vertical = 8.dp)
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+        ) {
+            Image(
+                painter = painterResource(id = R.drawable.chat_theme),
+                contentDescription = "Chat Theme",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
+
+            if (isLoading && messages.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(color = Color(0xFF0F172A))
+                }
+            } else {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(messages) { msg ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = if (msg.isMine) Arrangement.End else Arrangement.Start
                         ) {
-                            if (!msg.isMine) {
-                                Text(
-                                    msg.sender,
-                                    color = Color(0xFF93C5FD),
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Spacer(modifier = Modifier.height(2.dp))
+                            Column(
+                                modifier = Modifier
+                                    .widthIn(max = 290.dp)
+                                    .background(
+                                        if (msg.isMine) uiConfig.mineBubbleColor else uiConfig.otherBubbleColor,
+                                        RoundedCornerShape(
+                                            topStart = 12.dp,
+                                            topEnd = 12.dp,
+                                            bottomStart = if (msg.isMine) 12.dp else 2.dp,
+                                            bottomEnd = if (msg.isMine) 2.dp else 12.dp
+                                        )
+                                    )
+                                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                            ) {
+                                if (!msg.isMine) {
+                                    Text(
+                                        msg.sender,
+                                        color = Color(0xFF7DD3FC),
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                }
+                                Text(msg.text, color = Color.White, fontSize = 14.sp)
                             }
-                            Text(msg.text, color = Color.White, fontSize = 14.sp)
                         }
                     }
                 }
